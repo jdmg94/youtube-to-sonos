@@ -1,0 +1,2337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube ➔ Sonos Streamer</title>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Plus+Jakarta+Sans:wght@300;400;500;700&display=swap" rel="stylesheet">
+    
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --panel-bg: rgba(20, 27, 45, 0.65);
+            --card-bg: rgba(30, 41, 67, 0.45);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --accent-primary: #ff0055; /* YouTube Red-ish */
+            --accent-secondary: #d4af37; /* Sonos Gold-ish */
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --glow-color: rgba(255, 0, 85, 0.25);
+            --font-display: 'Outfit', sans-serif;
+            --font-sans: 'Plus Jakarta Sans', sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        /* Visually hidden but available to screen readers */
+        .sr-only {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            padding: 0;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+        }
+
+        /* Keyboard focus: visible ring for accessibility, hidden for mouse users */
+        :focus-visible {
+            outline: 2px solid var(--accent-secondary);
+            outline-offset: 2px;
+            border-radius: 4px;
+        }
+
+        /* Respect users who prefer reduced motion */
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+                scroll-behavior: auto !important;
+            }
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            min-height: 100vh;
+            /* Desktop: lock the whole app to the viewport so panels scroll internally (bento) */
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-image:
+                radial-gradient(circle at 10% 20%, rgba(255, 0, 85, 0.08) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(212, 175, 55, 0.08) 0%, transparent 40%);
+        }
+
+        header {
+            width: 100%;
+            max-width: 1200px;
+            padding: 1.75rem 1.5rem 1.25rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+
+        .logo {
+            font-family: var(--font-display);
+            font-weight: 800;
+            font-size: 1.8rem;
+            letter-spacing: -0.5px;
+            background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-secondary) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .logo i {
+            font-size: 1.6rem;
+            background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-secondary) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .status-badge {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            padding: 0.5rem 1rem;
+            border-radius: 9999px;
+            font-size: 0.85rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-muted);
+            backdrop-filter: blur(10px);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #10b981;
+            box-shadow: 0 0 10px #10b981;
+            transition: background-color 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .status-dot.scanning {
+            background-color: var(--accent-secondary);
+            box-shadow: 0 0 10px var(--accent-secondary);
+            animation: pulse-dot 1.2s ease-in-out infinite;
+        }
+
+        .status-dot.offline {
+            background-color: #6b7280;
+            box-shadow: none;
+        }
+
+        @keyframes pulse-dot {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.35; }
+        }
+
+        main {
+            width: 100%;
+            max-width: 1200px;
+            padding: 0 1.5rem 1.5rem;
+            display: grid;
+            grid-template-columns: 340px 1fr;
+            gap: 1.5rem;
+            flex-grow: 1;
+            min-height: 0;          /* allow grid children to shrink and scroll internally */
+        }
+
+        /* Grid children must be allowed to shrink below their content for internal scroll */
+        main > * { min-height: 0; }
+        main > .glass-panel { overflow-y: auto; }   /* the Stream Controller scrolls within itself */
+
+        /* Left column: speakers (40%) stacked above playback history (60%) */
+        .left-col {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+            min-height: 0;
+        }
+        .left-col > .glass-panel {
+            min-height: 0;
+            overflow: hidden;
+        }
+        .left-col > .glass-panel.sidebar {
+            align-self: stretch;    /* override .sidebar's align-self:start so it fills the width */
+        }
+        .playback-card { flex: 0 0 auto; }       /* sized to the controls */
+        .history-card  { flex: 1 1 0; }          /* fills the rest, scrolls internally */
+
+        .glass-panel {
+            background: var(--panel-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--border-color);
+            border-radius: 24px;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+            transition: transform 0.3s ease;
+        }
+
+        /* Compact sidebar variant for the Speakers panel */
+        .glass-panel.sidebar {
+            padding: 1.25rem;
+            align-self: start;
+        }
+
+        .glass-panel.sidebar h2 {
+            font-size: 1.15rem;
+        }
+
+        .glass-panel.sidebar .device-header {
+            margin-bottom: 1rem;
+        }
+
+        h2 {
+            font-family: var(--font-display);
+            font-weight: 600;
+            font-size: 1.4rem;
+            margin-bottom: 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        /* Step number badge to communicate the 1 → 2 flow */
+        .step-num {
+            width: 26px;
+            height: 26px;
+            flex-shrink: 0;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Device Section */
+        .device-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .device-header h2 {
+            margin-bottom: 0;
+        }
+
+        .refresh-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 1.1rem;
+            padding: 0.5rem;
+            border-radius: 50%;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 36px;
+            height: 36px;
+        }
+
+        .refresh-btn:hover {
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .refresh-btn.spinning i {
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            100% { transform: rotate(360deg); }
+        }
+
+        .device-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+            overflow-y: auto;
+            flex-grow: 1;
+            min-height: 0;
+            padding-right: 0.4rem;
+        }
+
+        /* Custom Scrollbar */
+        .device-list::-webkit-scrollbar,
+        .history-list::-webkit-scrollbar {
+            width: 6px;
+        }
+        .device-list::-webkit-scrollbar-track,
+        .history-list::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .device-list::-webkit-scrollbar-thumb,
+        .history-list::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+
+        .device-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            padding: 0.7rem 0.85rem;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .device-card:hover {
+            border-color: rgba(255, 255, 255, 0.2);
+            background: rgba(40, 54, 86, 0.5);
+            transform: translateY(-2px);
+        }
+
+        .device-card.active {
+            border-color: var(--accent-secondary);
+            box-shadow: 0 0 20px rgba(212, 175, 55, 0.15);
+            background: rgba(212, 175, 55, 0.08);
+        }
+
+        .device-icon {
+            width: 38px;
+            height: 38px;
+            flex-shrink: 0;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.1rem;
+            color: var(--text-muted);
+            transition: all 0.3s ease;
+        }
+
+        .device-card.active .device-icon {
+            background: var(--accent-secondary);
+            color: #0b0f19;
+        }
+
+        .device-info {
+            display: flex;
+            flex-direction: column;
+            gap: 0.1rem;
+            min-width: 0;
+        }
+
+        .device-name {
+            font-weight: 600;
+            font-size: 0.95rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .device-ip {
+            font-size: 0.78rem;
+            color: var(--text-muted);
+        }
+
+        .empty-devices {
+            text-align: center;
+            padding: 2rem 1rem;
+            color: var(--text-muted);
+            font-style: italic;
+            font-size: 0.9rem;
+        }
+
+        /* "Now controlling" target — links the speaker choice to the controller */
+        /* Current-speaker banner — also the trigger that opens the speaker picker modal */
+        .controlling-bar {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            width: 100%;
+            background: rgba(212, 175, 55, 0.06);
+            border: 1px solid rgba(212, 175, 55, 0.18);
+            border-radius: 12px;
+            padding: 0.7rem 1rem;
+            font-family: inherit;
+            font-size: 0.9rem;
+            text-align: left;
+            color: var(--text-muted);
+            cursor: pointer;
+            transition: background 0.2s ease, border-color 0.2s ease;
+        }
+
+        .controlling-bar:hover {
+            background: rgba(212, 175, 55, 0.12);
+            border-color: rgba(212, 175, 55, 0.35);
+        }
+
+        .controlling-bar i {
+            color: var(--accent-secondary);
+        }
+
+        .controlling-bar .controlling-chevron {
+            margin-left: auto;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        .controlling-bar.none {
+            background: rgba(255, 255, 255, 0.03);
+            border-color: var(--border-color);
+        }
+
+        .controlling-bar.none i {
+            color: var(--text-muted);
+        }
+
+        .controlling-name {
+            color: var(--text-main);
+            font-weight: 600;
+        }
+
+        /* Autoplay toggle */
+        .autoplay-toggle {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            cursor: pointer;
+            user-select: none;
+            margin-bottom: 1.25rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            width: fit-content;
+        }
+
+        .autoplay-toggle input {
+            position: absolute;
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        .autoplay-track {
+            width: 38px;
+            height: 22px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.12);
+            border: 1px solid var(--border-color);
+            position: relative;
+            flex-shrink: 0;
+            transition: background 0.2s ease, border-color 0.2s ease;
+        }
+
+        .autoplay-thumb {
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--text-muted);
+            transition: transform 0.2s ease, background 0.2s ease;
+        }
+
+        .autoplay-toggle input:checked + .autoplay-track {
+            background: rgba(212, 175, 55, 0.25);
+            border-color: rgba(212, 175, 55, 0.4);
+        }
+
+        .autoplay-toggle input:checked + .autoplay-track .autoplay-thumb {
+            transform: translateX(16px);
+            background: var(--accent-secondary);
+        }
+
+        .autoplay-toggle input:focus-visible + .autoplay-track {
+            outline: 2px solid var(--accent-secondary);
+            outline-offset: 2px;
+        }
+
+        .autoplay-label {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .autoplay-label i {
+            color: var(--accent-secondary);
+        }
+
+        /* Stream Controller Section */
+        .input-group {
+            display: flex;
+            gap: 0.75rem;
+            margin-bottom: 1.5rem;
+            position: relative;
+        }
+
+        .url-input {
+            flex-grow: 1;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            padding: 1rem 1.25rem;
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+
+        .url-input:focus {
+            outline: none;
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 15px rgba(255, 0, 85, 0.15);
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .action-btn {
+            background: linear-gradient(135deg, var(--accent-primary) 0%, #d00043 100%);
+            border: none;
+            color: white;
+            padding: 1rem 1.75rem;
+            border-radius: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            box-shadow: 0 4px 15px rgba(255, 0, 85, 0.3);
+        }
+
+        .action-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(255, 0, 85, 0.45);
+        }
+
+        .action-btn:active {
+            transform: translateY(0);
+        }
+
+        .action-btn:disabled {
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-muted);
+            cursor: not-allowed;
+            box-shadow: none;
+            transform: none;
+        }
+
+        /* Video Info Panel */
+        .info-panel {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 1.5rem;
+            margin-top: 1rem;
+            margin-bottom: 1.5rem;
+            display: none;
+            animation: fadeIn 0.4s ease-out;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .info-panel.visible {
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .video-meta {
+            display: flex;
+            gap: 1.5rem;
+        }
+
+        @media (max-width: 600px) {
+            .video-meta {
+                flex-direction: column;
+            }
+        }
+
+        .thumbnail-container {
+            width: 180px;
+            aspect-ratio: 16/9;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+            position: relative;
+            flex-shrink: 0;
+            box-shadow: 0 8px 16px rgba(0,0,0,0.4);
+        }
+
+        .thumbnail {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .video-details {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            gap: 0.5rem;
+        }
+
+        .video-title {
+            font-family: var(--font-display);
+            font-weight: 600;
+            font-size: 1.25rem;
+            line-height: 1.4;
+        }
+
+        .video-author {
+            color: var(--text-muted);
+            font-size: 0.95rem;
+        }
+
+        .video-duration {
+            font-size: 0.85rem;
+            background: rgba(255, 255, 255, 0.08);
+            padding: 0.25rem 0.5rem;
+            border-radius: 6px;
+            align-self: flex-start;
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+
+        /* Controls Panel */
+        .controls-row {
+            display: flex;
+            gap: 1rem;
+            border-top: 1px solid var(--border-color);
+            padding-top: 1.5rem;
+        }
+
+        .btn-play {
+            flex-grow: 2;
+            background: linear-gradient(135deg, var(--accent-secondary) 0%, #b29124 100%);
+            box-shadow: 0 4px 15px rgba(212, 175, 55, 0.25);
+        }
+        .btn-play:hover {
+            box-shadow: 0 6px 20px rgba(212, 175, 55, 0.4);
+        }
+
+        .btn-stop {
+            flex-grow: 1;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            box-shadow: none;
+        }
+        .btn-stop:hover {
+            background: rgba(255, 255, 255, 0.15);
+            box-shadow: none;
+        }
+
+        /* Shimmer Loading Animation */
+        .shimmer-card {
+            display: none;
+            flex-direction: column;
+            gap: 1.5rem;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 1.5rem;
+            margin-top: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .shimmer-card.visible {
+            display: flex;
+        }
+
+        .shimmer {
+            background: linear-gradient(
+                90deg,
+                rgba(255, 255, 255, 0.03) 25%,
+                rgba(255, 255, 255, 0.08) 50%,
+                rgba(255, 255, 255, 0.03) 75%
+            );
+            background-size: 200% 100%;
+            animation: shimmer 1.5s infinite;
+            border-radius: 8px;
+        }
+
+        @keyframes shimmer {
+            0% { background-position: -200% 0; }
+            100% { background-position: 200% 0; }
+        }
+
+        /* Now Playing card — driven by polling the speaker's live state */
+        .nowplaying-card {
+            display: none;
+            flex-direction: column;
+            gap: 0.85rem;
+            background: rgba(16, 185, 129, 0.05);
+            border: 1px solid rgba(16, 185, 129, 0.15);
+            border-radius: 16px;
+            padding: 1rem 1.1rem;
+            margin-bottom: 1.5rem;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .nowplaying-card.visible {
+            display: flex;
+        }
+
+        /* Title row: live indicator + track text (gets the full card width) */
+        .np-main {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            min-width: 0;
+        }
+
+        /* Transport row: prev · stop · next, stop fills the middle */
+        .np-controls {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+        }
+
+        .nowplaying-card.paused {
+            background: rgba(255, 255, 255, 0.04);
+            border-color: var(--border-color);
+        }
+
+        .np-state {
+            width: 40px;
+            height: 40px;
+            flex-shrink: 0;
+            border-radius: 10px;
+            background: rgba(16, 185, 129, 0.12);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .nowplaying-card.paused .np-state {
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        .nowplaying-card.paused .eq-bar {
+            background-color: var(--text-muted);
+            animation: none;
+            height: 55%;
+        }
+
+        .np-info {
+            flex-grow: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.15rem;
+        }
+
+        .np-label {
+            font-size: 0.72rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
+            font-weight: 700;
+        }
+
+        .np-title {
+            font-weight: 600;
+            font-size: 1rem;
+            color: var(--text-main);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .np-stop {
+            flex: 1;
+            justify-content: center;
+            padding: 0.6rem 1rem;
+        }
+
+        .eq-wave {
+            display: flex;
+            align-items: flex-end;
+            gap: 3px;
+            height: 18px;
+            width: 25px;
+        }
+
+        .eq-bar {
+            width: 3px;
+            height: 100%;
+            background-color: #10b981;
+            animation: bounce 0.8s ease-in-out infinite alternate;
+            border-radius: 1.5px;
+        }
+        .eq-bar:nth-child(2) { animation-delay: 0.25s; }
+        .eq-bar:nth-child(3) { animation-delay: 0.5s; }
+        .eq-bar:nth-child(4) { animation-delay: 0.15s; }
+
+        @keyframes bounce {
+            0% { height: 20%; }
+            100% { height: 100%; }
+        }
+
+        /* Grouped playback deck: speaker indicator + transport controls + volume share one card */
+        .playback-deck {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        /* Inside the deck, spacing comes from the flex gap — drop the components' own margins */
+        .playback-deck .controlling-bar { margin-bottom: 0; }
+        .playback-deck .nowplaying-card { margin-bottom: 0; }
+        .playback-deck .volume-panel { margin-top: 0; }
+
+        /* Volume Control */
+        .volume-panel {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 1rem 1.1rem;
+            margin-top: 1rem;
+            display: none;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .volume-panel.visible {
+            display: block;
+        }
+
+        .volume-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+        }
+
+        .volume-label {
+            font-weight: 600;
+            font-size: 0.95rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .volume-label i {
+            color: var(--accent-secondary);
+        }
+
+        .volume-value {
+            font-family: var(--font-display);
+            font-weight: 600;
+            font-size: 1.1rem;
+            color: var(--accent-secondary);
+            min-width: 3ch;
+            text-align: right;
+        }
+
+        .volume-slider-row {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .mute-btn {
+            background: none;
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 1.1rem;
+            padding: 0.6rem;
+            border-radius: 10px;
+            transition: all 0.25s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 40px;
+            height: 40px;
+            flex-shrink: 0;
+        }
+
+        .mute-btn:hover {
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        .mute-btn.muted {
+            color: var(--accent-primary);
+            border-color: rgba(255, 0, 85, 0.3);
+            background: rgba(255, 0, 85, 0.08);
+        }
+
+        .volume-slider-container {
+            flex-grow: 1;
+            position: relative;
+            height: 40px;
+            display: flex;
+            align-items: center;
+        }
+
+        .volume-slider {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.1);
+            outline: none;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .volume-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: var(--accent-secondary);
+            cursor: pointer;
+            box-shadow: 0 0 12px rgba(212, 175, 55, 0.4);
+            transition: all 0.2s ease;
+            border: 3px solid #1a1f30;
+        }
+
+        .volume-slider::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+            box-shadow: 0 0 18px rgba(212, 175, 55, 0.6);
+        }
+
+        .volume-slider::-moz-range-thumb {
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: var(--accent-secondary);
+            cursor: pointer;
+            box-shadow: 0 0 12px rgba(212, 175, 55, 0.4);
+            border: 3px solid #1a1f30;
+        }
+
+        .volume-slider::-moz-range-track {
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .volume-presets {
+            display: flex;
+            gap: 0.4rem;
+            margin-top: 0.85rem;
+        }
+
+        .preset-btn {
+            flex: 1;
+            text-align: center;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            font-size: 0.72rem;
+            font-weight: 500;
+            padding: 0.35rem 0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .preset-btn:hover {
+            background: rgba(212, 175, 55, 0.12);
+            border-color: rgba(212, 175, 55, 0.3);
+            color: var(--accent-secondary);
+        }
+
+        /* Prev / Next navigation buttons inside the Now Playing card */
+        .np-nav {
+            flex-shrink: 0;
+            width: 38px;
+            height: 38px;
+            border-radius: 10px;
+            border: 1px solid rgba(16, 185, 129, 0.25);
+            background: rgba(16, 185, 129, 0.1);
+            color: #10b981;
+            cursor: pointer;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+        .np-nav:hover:not(:disabled) {
+            background: rgba(16, 185, 129, 0.2);
+            transform: translateY(-1px);
+        }
+        .np-nav:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+        }
+        .nowplaying-card.paused .np-nav {
+            border-color: var(--border-color);
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-muted);
+        }
+
+        /* Recently played history */
+        .history-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1rem;
+            flex-shrink: 0;
+        }
+
+        .history-title-label {
+            font-weight: 600;
+            font-size: 0.95rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .history-title-label i {
+            color: var(--accent-secondary);
+        }
+
+        .history-clear {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            font-weight: 500;
+            padding: 0.3rem 0.7rem;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .history-clear:hover {
+            background: rgba(255, 0, 85, 0.1);
+            border-color: rgba(255, 0, 85, 0.3);
+            color: var(--accent-primary);
+        }
+
+        .history-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            flex-grow: 1;
+            min-height: 0;
+            overflow-y: auto;
+            padding-right: 0.4rem;
+        }
+
+        .history-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            width: 100%;
+            text-align: left;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid transparent;
+            border-radius: 12px;
+            padding: 0.5rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .history-item:hover {
+            background: rgba(255, 255, 255, 0.07);
+        }
+        .history-item.active {
+            background: rgba(16, 185, 129, 0.08);
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        .history-thumb {
+            width: 48px;
+            height: 48px;
+            flex-shrink: 0;
+            border-radius: 8px;
+            object-fit: cover;
+            background: rgba(255, 255, 255, 0.05);
+        }
+        .history-thumb-placeholder {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--text-muted);
+        }
+
+        .history-meta {
+            flex-grow: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.1rem;
+        }
+        .history-track-title {
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: var(--text-main);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .history-track-author {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .history-play-icon {
+            flex-shrink: 0;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+            padding-right: 0.4rem;
+        }
+        .history-item:hover .history-play-icon {
+            opacity: 1;
+        }
+        .history-item.active .history-play-icon {
+            opacity: 1;
+            color: #10b981;
+        }
+
+        .history-empty {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            text-align: center;
+            padding: 1rem 0;
+        }
+
+        /* Speaker picker modal */
+        .modal-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+            background: rgba(5, 8, 15, 0.6);
+            backdrop-filter: blur(6px);
+            -webkit-backdrop-filter: blur(6px);
+            animation: modalFade 0.2s ease;
+        }
+        .modal-overlay[hidden] { display: none; }
+
+        @keyframes modalFade {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .modal {
+            width: 100%;
+            max-width: 460px;
+            max-height: 80vh;
+            display: flex;
+            flex-direction: column;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 24px;
+            padding: 1.5rem;
+            box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            animation: modalPop 0.2s ease;
+        }
+
+        @keyframes modalPop {
+            from { transform: translateY(12px) scale(0.98); opacity: 0; }
+            to { transform: none; opacity: 1; }
+        }
+
+        .modal .device-header { flex-shrink: 0; }
+        .modal .device-list { flex-grow: 1; min-height: 0; }
+
+        .modal-header-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .modal-close {
+            background: none;
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            cursor: pointer;
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+        .modal-close:hover {
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        body.modal-open { overflow: hidden; }
+
+        /* Toast Notification */
+        .toast {
+            position: fixed;
+            bottom: 2rem;
+            right: 2rem;
+            background: rgba(15, 23, 42, 0.9);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1rem 1.5rem;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            transform: translateY(100px);
+            opacity: 0;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            z-index: 1000;
+            backdrop-filter: blur(10px);
+        }
+
+        .toast.show {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .toast-error {
+            border-color: rgba(239, 68, 68, 0.4);
+            color: #f87171;
+        }
+
+        .toast-success {
+            border-color: rgba(16, 185, 129, 0.4);
+            color: #34d399;
+        }
+
+        footer {
+            margin-top: auto;
+            padding: 2rem;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-align: center;
+            border-top: 1px solid var(--border-color);
+            width: 100%;
+            flex-shrink: 0;
+        }
+
+        /* ===== Tablet & mobile: stack into a single, page-scrolling column ===== */
+        @media (max-width: 900px) {
+            body {
+                height: auto;            /* unlock the viewport so the page scrolls naturally */
+                min-height: 100vh;
+                overflow-x: hidden;
+                overflow-y: auto;
+            }
+            main {
+                grid-template-columns: 1fr;
+                min-height: 0;
+                padding-bottom: 2rem;
+            }
+            main > .glass-panel {
+                overflow-y: visible;     /* the page scrolls, not the panel */
+            }
+            .left-col > .glass-panel {
+                overflow: visible;
+            }
+            /* Stacked: let each card size to its content */
+            .playback-card,
+            .history-card {
+                flex: 0 0 auto;
+            }
+            .history-list { max-height: 55vh; }
+        }
+
+        /* ===== Phone: tighten spacing and enlarge touch targets ===== */
+        @media (max-width: 600px) {
+            header {
+                padding: 1.25rem 1rem 0.85rem;
+            }
+            .logo { font-size: 1.4rem; }
+            .logo i { font-size: 1.3rem; }
+            main {
+                padding: 0 1rem 2rem;
+                gap: 1rem;
+            }
+            .left-col { gap: 1rem; }
+            .glass-panel {
+                padding: 1.25rem;
+                border-radius: 20px;
+            }
+            h2 { font-size: 1.2rem; margin-bottom: 1rem; }
+            /* Stack inputs and action rows so nothing is cramped on a narrow screen */
+            .input-group { flex-direction: column; }
+            .controls-row { flex-direction: column; }
+            .np-nav { width: 44px; height: 44px; }   /* comfortable tap targets */
+            .history-item { padding: 0.6rem; }
+            .history-list { max-height: 60vh; }
+            .modal { max-height: 88vh; }
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="logo">
+            <i class="fa-brands fa-youtube"></i>
+            <span>YouTube ➔ Sonos</span>
+        </div>
+        <div class="status-badge" id="status-badge" aria-live="polite">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="status-badge-text">Connecting…</span>
+        </div>
+    </header>
+
+    <main>
+        <!-- Left column: speakers (40%) + playback history (60%) -->
+        <div class="left-col">
+        <!-- Player: current speaker (tap the banner to change) + transport controls + volume -->
+        <section class="glass-panel sidebar playback-card">
+            <div class="playback-deck">
+                <button type="button" class="controlling-bar none" id="controlling-bar" aria-haspopup="dialog" title="Change speaker">
+                    <i class="fa-solid fa-circle-nodes" aria-hidden="true"></i>
+                    <span id="controlling-text">Select a speaker to start</span>
+                    <i class="fa-solid fa-chevron-down controlling-chevron" aria-hidden="true"></i>
+                </button>
+
+                <!-- Now Playing card — reflects the speaker's live state, persists across refresh -->
+                <div class="nowplaying-card" id="nowplaying-card">
+                    <div class="np-main">
+                        <div class="np-state">
+                            <div class="eq-wave">
+                                <span class="eq-bar"></span>
+                                <span class="eq-bar"></span>
+                                <span class="eq-bar"></span>
+                                <span class="eq-bar"></span>
+                            </div>
+                        </div>
+                        <div class="np-info">
+                            <div class="np-label" id="np-label">Now playing</div>
+                            <div class="np-title" id="np-title">—</div>
+                        </div>
+                    </div>
+                    <div class="np-controls">
+                        <button class="np-nav" id="btn-prev" aria-label="Previous track" disabled>
+                            <i class="fa-solid fa-backward-step" aria-hidden="true"></i>
+                        </button>
+                        <button class="action-btn btn-stop np-stop" id="btn-stop-sonos" aria-label="Stop playback">
+                            <i class="fa-solid fa-stop" aria-hidden="true"></i> Stop
+                        </button>
+                        <button class="np-nav" id="btn-next" aria-label="Next track" disabled>
+                            <i class="fa-solid fa-forward-step" aria-hidden="true"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Volume controls — grouped with the playback controls and speaker indicator -->
+                <div class="volume-panel" id="volume-panel">
+                    <div class="volume-header">
+                        <span class="volume-label"><i class="fa-solid fa-sliders"></i> Volume</span>
+                        <span class="volume-value" id="volume-value">--</span>
+                    </div>
+                    <div class="volume-slider-row">
+                        <button class="mute-btn" id="btn-mute" title="Toggle mute" aria-label="Toggle mute" aria-pressed="false">
+                            <i class="fa-solid fa-volume-high" id="mute-icon" aria-hidden="true"></i>
+                        </button>
+                        <div class="volume-slider-container">
+                            <input type="range" min="0" max="100" value="30" class="volume-slider" id="volume-slider"
+                                   aria-label="Volume" aria-valuemin="0" aria-valuemax="100" aria-valuenow="30">
+                        </div>
+                    </div>
+                    <div class="volume-presets">
+                        <button class="preset-btn" data-vol="10">10%</button>
+                        <button class="preset-btn" data-vol="25">25%</button>
+                        <button class="preset-btn" data-vol="50">50%</button>
+                        <button class="preset-btn" data-vol="75">75%</button>
+                        <button class="preset-btn" data-vol="100">100%</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Recently played: browser-side history; the list scrolls within this card -->
+        <section class="glass-panel sidebar history-card" id="history-panel">
+            <div class="history-header">
+                <span class="history-title-label">
+                    <i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i> Recently played
+                </span>
+                <button class="history-clear" id="btn-clear-history">Clear</button>
+            </div>
+            <div class="history-list" id="history-list"></div>
+        </section>
+        </div>
+
+        <!-- Stream control Panel -->
+        <section class="glass-panel controller-card">
+            <h2><i class="fa-solid fa-tower-broadcast" aria-hidden="true"></i> Stream Controller</h2>
+
+            <!-- Shimmer Loading -->
+            <div class="shimmer-card" id="shimmer-card">
+                <div class="video-meta">
+                    <div class="thumbnail-container shimmer" style="height: 100px;"></div>
+                    <div class="video-details" style="flex-grow: 1; gap: 0.75rem;">
+                        <div class="shimmer" style="height: 20px; width: 80%;"></div>
+                        <div class="shimmer" style="height: 14px; width: 50%;"></div>
+                        <div class="shimmer" style="height: 16px; width: 30%;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Video Info Panel — sits above the search bar so the analyzed track stays visible while you queue the next one -->
+            <div class="info-panel" id="info-panel">
+                <div class="video-meta">
+                    <div class="thumbnail-container">
+                        <img src="" alt="Thumbnail" class="thumbnail" id="video-thumb">
+                    </div>
+                    <div class="video-details">
+                        <div class="video-title" id="video-title">Video Title Placeholder</div>
+                        <div class="video-author" id="video-author">Channel Name</div>
+                        <div class="video-duration">
+                            <i class="fa-regular fa-clock"></i>
+                            <span id="video-duration">0:00</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="controls-row">
+                    <button class="action-btn btn-play" id="btn-play-sonos" style="flex-grow: 1;">
+                        <i class="fa-solid fa-wifi" aria-hidden="true"></i> Play on Sonos
+                    </button>
+                </div>
+            </div>
+
+            <div class="input-group">
+                <label for="yt-url" class="sr-only">YouTube video URL</label>
+                <input type="text" class="url-input" id="yt-url" placeholder="Paste YouTube Video URL (e.g. https://youtu.be/…)" autocomplete="off" inputmode="url" spellcheck="false">
+                <button class="action-btn" id="btn-analyze">
+                    <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i> Analyze
+                </button>
+            </div>
+
+            <label class="autoplay-toggle">
+                <input type="checkbox" id="autoplay-toggle" checked>
+                <span class="autoplay-track"><span class="autoplay-thumb"></span></span>
+                <span class="autoplay-label"><i class="fa-solid fa-infinity" aria-hidden="true"></i> Autoplay similar tracks</span>
+            </label>
+
+        </section>
+    </main>
+
+    <!-- Speaker picker modal: opened by tapping the current-speaker banner -->
+    <div class="modal-overlay" id="speaker-modal" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="speaker-modal-title">
+            <div class="device-header">
+                <h2 id="speaker-modal-title"><i class="fa-solid fa-compact-disc" aria-hidden="true"></i> Speakers</h2>
+                <div class="modal-header-actions">
+                    <button class="refresh-btn" id="refresh-devices" title="Refresh speaker list" aria-label="Refresh speaker list">
+                        <i class="fa-solid fa-rotate-right" aria-hidden="true"></i>
+                    </button>
+                    <button class="modal-close" id="speaker-modal-close" aria-label="Close speaker list">
+                        <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="device-list" id="devices-container">
+                <div class="empty-devices">Scanning for speakers…</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast" id="toast-notification">
+        <i class="fa-solid" id="toast-icon"></i>
+        <span id="toast-message">Notification text</span>
+    </div>
+
+    <footer>
+        YouTube ➔ Sonos Streamer &copy; 2026. Powered by Soco, yt-dlp & FFmpeg.
+    </footer>
+
+    <script>
+        const STORAGE_KEY = 'yts_state_v1';
+        const HISTORY_KEY = 'yts_history_v1';
+        const HISTORY_CAP = 50;
+        let selectedDeviceIp = null;
+        let selectedDeviceName = null;
+        let selectedVideoUrl = null;
+        let lastVideoInfo = null;
+        let evtSource = null;
+        let evtDeviceIp = null;
+        let lastNpTitle = null;
+        let playHistory = [];      // chronological log of played tracks (oldest → newest)
+        let historyIndex = -1;     // cursor into playHistory for prev/next navigation
+        // Eagerly-resolved next autoplay track so the Next button has zero latency.
+        // { seedId, promise } — the in-flight/settled /api/next call for the current track.
+        let prefetchedNext = null;
+
+        // Dom Elements
+        const statusDot = document.getElementById('status-dot');
+        const statusBadgeText = document.getElementById('status-badge-text');
+        const controllingBar = document.getElementById('controlling-bar');
+        const controllingText = document.getElementById('controlling-text');
+        const refreshBtn = document.getElementById('refresh-devices');
+        const devicesContainer = document.getElementById('devices-container');
+        const speakerModal = document.getElementById('speaker-modal');
+        const speakerModalClose = document.getElementById('speaker-modal-close');
+        const ytUrlInput = document.getElementById('yt-url');
+        const btnAnalyze = document.getElementById('btn-analyze');
+        const infoPanel = document.getElementById('info-panel');
+        const shimmerCard = document.getElementById('shimmer-card');
+        const nowplayingCard = document.getElementById('nowplaying-card');
+        const npLabel = document.getElementById('np-label');
+        const npTitle = document.getElementById('np-title');
+        const autoplayToggle = document.getElementById('autoplay-toggle');
+
+        const videoThumb = document.getElementById('video-thumb');
+        const videoTitle = document.getElementById('video-title');
+        const videoAuthor = document.getElementById('video-author');
+        const videoDuration = document.getElementById('video-duration');
+
+        const btnPlaySonos = document.getElementById('btn-play-sonos');
+        const btnStopSonos = document.getElementById('btn-stop-sonos');
+        const btnPrev = document.getElementById('btn-prev');
+        const btnNext = document.getElementById('btn-next');
+        const historyList = document.getElementById('history-list');
+        const btnClearHistory = document.getElementById('btn-clear-history');
+
+        const toast = document.getElementById('toast-notification');
+        const toastIcon = document.getElementById('toast-icon');
+        const toastMessage = document.getElementById('toast-message');
+
+        const volumePanel = document.getElementById('volume-panel');
+        const volumeSlider = document.getElementById('volume-slider');
+        const volumeValue = document.getElementById('volume-value');
+        const btnMute = document.getElementById('btn-mute');
+        const muteIcon = document.getElementById('mute-icon');
+        let isMuted = false;
+        let volumeDebounceTimer = null;
+
+        // Helpers
+        function setStatusBadge(state, text) {
+            statusDot.classList.remove('scanning', 'offline');
+            if (state === 'scanning') statusDot.classList.add('scanning');
+            if (state === 'offline') statusDot.classList.add('offline');
+            statusBadgeText.textContent = text;
+        }
+
+        function setControlling(name) {
+            selectedDeviceName = name;
+            if (name) {
+                controllingBar.classList.remove('none');
+                controllingText.innerHTML = `Controlling <span class="controlling-name"></span>`;
+                controllingBar.querySelector('.controlling-name').textContent = name;
+            } else {
+                controllingBar.classList.add('none');
+                controllingText.textContent = 'Select a speaker to start';
+            }
+        }
+
+        // --- Speaker picker modal: opened by tapping the current-speaker banner ---
+        function openSpeakerModal() {
+            speakerModal.hidden = false;
+            document.body.classList.add('modal-open');
+            speakerModalClose.focus();
+        }
+
+        function closeSpeakerModal() {
+            speakerModal.hidden = true;
+            document.body.classList.remove('modal-open');
+            controllingBar.focus();
+        }
+
+        // --- Persistence: remember the selected speaker + last analyzed video across refreshes ---
+        function saveState() {
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify({
+                    deviceIp: selectedDeviceIp,
+                    deviceName: selectedDeviceName,
+                    videoUrl: selectedVideoUrl,
+                    videoInfo: lastVideoInfo,
+                    autoplay: autoplayToggle.checked
+                }));
+            } catch (e) { /* storage may be unavailable; non-fatal */ }
+        }
+
+        function loadState() {
+            try {
+                return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+            } catch (e) {
+                return {};
+            }
+        }
+
+        // --- Playback history: a browser-side log of played tracks with prev/next navigation ---
+        function loadHistory() {
+            try {
+                const data = JSON.parse(localStorage.getItem(HISTORY_KEY)) || {};
+                playHistory = Array.isArray(data.items) ? data.items : [];
+                historyIndex = Number.isInteger(data.index) ? data.index : playHistory.length - 1;
+                if (historyIndex >= playHistory.length) historyIndex = playHistory.length - 1;
+            } catch (e) {
+                playHistory = [];
+                historyIndex = -1;
+            }
+        }
+
+        function saveHistory() {
+            try {
+                localStorage.setItem(HISTORY_KEY, JSON.stringify({ items: playHistory, index: historyIndex }));
+            } catch (e) { /* storage may be unavailable; non-fatal */ }
+        }
+
+        // Append a freshly played track and point the cursor at it (skips consecutive duplicates).
+        function recordPlay(entry) {
+            const current = playHistory[historyIndex];
+            if (current && current.url === entry.url) {
+                // Same track replayed in place — just refresh its metadata/timestamp
+                playHistory[historyIndex] = entry;
+            } else {
+                playHistory.push(entry);
+                if (playHistory.length > HISTORY_CAP) playHistory.shift();
+                historyIndex = playHistory.length - 1;
+            }
+            saveHistory();
+            renderHistory();
+            updateNavButtons();
+            // Warm up the next autoplay track now so clicking Next is instant.
+            prefetchNextTrack();
+        }
+
+        // Kick off the /api/next resolution for the current track in the background.
+        // Keyed by the current track's id so we only fetch once per track; the result
+        // is consumed by playNextAutoplay() with no extra latency when Next is clicked.
+        function prefetchNextTrack() {
+            // Only the track at the end of history seeds an autoplay Next; stepping
+            // through earlier history is instant and needs no prefetch.
+            if (historyIndex !== playHistory.length - 1) return;
+            const current = playHistory[historyIndex];
+            if (!current || !current.id) return;
+            if (prefetchedNext && prefetchedNext.seedId === current.id) return; // already warming
+            const exclude = playHistory.map(e => e.id).filter(Boolean).join(',');
+            const seedId = current.id;
+            const promise = fetch(`/api/next?video_id=${encodeURIComponent(seedId)}`
+                    + `&exclude=${encodeURIComponent(exclude)}`)
+                .then(r => r.json())
+                .catch(() => null);
+            prefetchedNext = { seedId, promise };
+        }
+
+        // Re-cast the track at a given history position on the current speaker.
+        async function castHistoryAt(index) {
+            if (index < 0 || index >= playHistory.length) return;
+            if (!selectedDeviceIp) {
+                showToast('Select a speaker first', 'error');
+                return;
+            }
+            const entry = playHistory[index];
+            historyIndex = index;
+            selectedVideoUrl = entry.url;
+            lastVideoInfo = entry;
+            ytUrlInput.value = entry.url;
+            renderVideoInfo(entry);
+            infoPanel.classList.add('visible');
+            saveState();
+            saveHistory();
+            renderHistory();
+            updateNavButtons();
+            // If we've stepped back to the end, warm the next autoplay track.
+            prefetchNextTrack();
+            try {
+                await castTrack(entry.url, autoplayToggle.checked);
+            } catch (err) {
+                showToast('Failed to play stream on Sonos', 'error');
+            }
+        }
+
+        function playPrev() {
+            if (historyIndex > 0) castHistoryAt(historyIndex - 1);
+        }
+
+        function playNext() {
+            // Mid-history: step forward through already-played tracks.
+            if (historyIndex < playHistory.length - 1) {
+                castHistoryAt(historyIndex + 1);
+                return;
+            }
+            // At the end: pull a fresh track from the current track's autoplay mix.
+            playNextAutoplay();
+        }
+
+        // Skip forward into YouTube's autoplay station: fetch the next related
+        // track for whatever is currently playing, then cast it as a new seed.
+        async function playNextAutoplay() {
+            const current = playHistory[historyIndex];
+            if (!current || !current.id) {
+                showToast('Nothing playing to find a next track for', 'error');
+                return;
+            }
+            if (!selectedDeviceIp) {
+                showToast('Select a speaker first', 'error');
+                return;
+            }
+
+            const originalDisabled = btnNext.disabled;
+            btnNext.disabled = true;
+            try {
+                // Use the track we eagerly prefetched for the current seed if it's
+                // ready; otherwise resolve it now. Either way, consume the prefetch.
+                const played = new Set(playHistory.map(e => e.id).filter(Boolean));
+                let data = null;
+                if (prefetchedNext && prefetchedNext.seedId === current.id) {
+                    data = await prefetchedNext.promise;
+                    prefetchedNext = null;
+                    // Guard against a stale suggestion we've since played.
+                    if (data && data.id && played.has(data.id)) data = null;
+                }
+                if (!data || data.error || !data.url) {
+                    // Exclude everything already played so the mix keeps moving forward.
+                    const exclude = playHistory.map(e => e.id).filter(Boolean).join(',');
+                    const resp = await fetch(`/api/next?video_id=${encodeURIComponent(current.id)}`
+                        + `&exclude=${encodeURIComponent(exclude)}`);
+                    data = await resp.json();
+                }
+                if (data.error || !data.url) {
+                    showToast(data.error || 'No next track found', 'error');
+                    return;
+                }
+
+                selectedVideoUrl = data.url;
+                lastVideoInfo = data;
+                ytUrlInput.value = data.url;
+                renderVideoInfo(data);
+                infoPanel.classList.add('visible');
+
+                const result = await castTrack(data.url, autoplayToggle.checked);
+                if (result) {
+                    recordPlay({
+                        url: data.url,
+                        title: result.title || data.title || 'Untitled',
+                        uploader: data.uploader || null,
+                        thumbnail: data.thumbnail || null,
+                        duration: data.duration || null,
+                        id: data.id || null,
+                        ts: Date.now()
+                    });
+                }
+            } catch (err) {
+                showToast('Failed to load next track', 'error');
+            } finally {
+                btnNext.disabled = originalDisabled;
+                updateNavButtons();
+            }
+        }
+
+        function updateNavButtons() {
+            btnPrev.disabled = !(historyIndex > 0);
+            // Next is always available while a track is loaded: either we step
+            // forward through history, or (at the end) we fetch a fresh autoplay
+            // track seeded from the current one.
+            btnNext.disabled = playHistory.length === 0;
+        }
+
+        // Rebuild the "Recently played" list (newest first); highlight the active entry.
+        function renderHistory() {
+            historyList.innerHTML = '';
+            if (!playHistory.length) {
+                const empty = document.createElement('div');
+                empty.className = 'history-empty';
+                empty.textContent = 'No tracks played yet';
+                historyList.appendChild(empty);
+                return;
+            }
+            for (let i = playHistory.length - 1; i >= 0; i--) {
+                const entry = playHistory[i];
+                const row = document.createElement('button');
+                row.type = 'button';
+                row.className = 'history-item' + (i === historyIndex ? ' active' : '');
+                row.dataset.index = i;
+
+                if (entry.thumbnail) {
+                    const img = document.createElement('img');
+                    img.className = 'history-thumb';
+                    img.src = entry.thumbnail;
+                    img.alt = '';
+                    row.appendChild(img);
+                } else {
+                    const ph = document.createElement('span');
+                    ph.className = 'history-thumb history-thumb-placeholder';
+                    ph.innerHTML = '<i class="fa-solid fa-music"></i>';
+                    row.appendChild(ph);
+                }
+
+                const meta = document.createElement('span');
+                meta.className = 'history-meta';
+                const title = document.createElement('span');
+                title.className = 'history-track-title';
+                title.textContent = entry.title || 'Untitled';
+                const author = document.createElement('span');
+                author.className = 'history-track-author';
+                author.textContent = entry.uploader || 'YouTube';
+                meta.appendChild(title);
+                meta.appendChild(author);
+                row.appendChild(meta);
+
+                const icon = document.createElement('i');
+                icon.className = 'fa-solid fa-play history-play-icon';
+                icon.setAttribute('aria-hidden', 'true');
+                row.appendChild(icon);
+
+                historyList.appendChild(row);
+            }
+        }
+
+        function clearHistory() {
+            if (!playHistory.length) return;
+            if (!confirm('Clear your playback history?')) return;
+            playHistory = [];
+            historyIndex = -1;
+            saveHistory();
+            renderHistory();
+            updateNavButtons();
+        }
+
+        function renderVideoInfo(info) {
+            videoTitle.textContent = info.title || 'Untitled';
+            videoAuthor.textContent = info.uploader || 'YouTube Video';
+            videoDuration.textContent = formatDuration(info.duration);
+            videoThumb.src = info.thumbnail || '';
+        }
+
+        // --- Now Playing: poll the speaker so the UI reflects its real state (survives refresh, tracks changes) ---
+        function renderNowPlaying(data) {
+            const state = data && data.state;
+            const playingStates = ['PLAYING', 'TRANSITIONING', 'PAUSED_PLAYBACK'];
+            if (!data || data.error || !playingStates.includes(state)) {
+                // Idle/stopped — keep the transport controls on screen (Next can
+                // kick off autoplay, Prev replays history) but show that nothing
+                // is currently playing. Reuse the paused styling to freeze the
+                // equalizer. Only fully hide when no speaker is chosen.
+                nowplayingCard.classList.add('paused');
+                const device = (data && data.device) || selectedDeviceName;
+                npLabel.textContent = `Idle${device ? ' · ' + device : ''}`;
+                npTitle.textContent = '—';
+                nowplayingCard.classList.toggle('visible', !!selectedDeviceIp);
+                lastNpTitle = null;
+                return;
+            }
+
+            const paused = state === 'PAUSED_PLAYBACK';
+            nowplayingCard.classList.toggle('paused', paused);
+            npLabel.textContent = paused
+                ? `Paused${data.device ? ' · ' + data.device : ''}`
+                : `Now playing${data.device ? ' · ' + data.device : ''}`;
+
+            const title = (data.title && data.title.trim()) ? data.title : 'Streaming audio';
+            npTitle.textContent = title;
+            nowplayingCard.classList.add('visible');
+
+            // Log autoplay advances to history. The server chains into YouTube's
+            // radio mix on its own (Sonos sees one static station), so the SSE
+            // feed is the only signal the client gets that the track changed.
+            // Guard on video id so the seed track — already recorded by
+            // playOnSonos — isn't logged twice when it arrives over SSE.
+            if (data.is_radio && data.video_id && playHistory[historyIndex]?.id !== data.video_id) {
+                recordPlay({
+                    url: `https://youtu.be/${data.video_id}`,
+                    title: (data.title && data.title.trim()) ? data.title : 'Untitled',
+                    uploader: data.artist || null,
+                    thumbnail: data.album_art || null,
+                    duration: null,
+                    id: data.video_id,
+                    ts: Date.now()
+                });
+            }
+
+            // Toast once when a new track begins
+            if (!paused && lastNpTitle !== null && title !== lastNpTitle) {
+                showToast(`Now playing: ${title}`);
+            }
+            if (!paused) lastNpTitle = title;
+        }
+
+        // Subscribe to the speaker's live state over Server-Sent Events.
+        // One persistent connection per speaker; the browser auto-reconnects on drop.
+        function connectEvents() {
+            // Already streaming this speaker — nothing to do
+            if (selectedDeviceIp === evtDeviceIp && evtSource) return;
+
+            if (evtSource) {
+                evtSource.close();
+                evtSource = null;
+            }
+            evtDeviceIp = selectedDeviceIp;
+
+            if (!selectedDeviceIp) {
+                nowplayingCard.classList.remove('visible');
+                return;
+            }
+
+            evtSource = new EventSource(`/api/events?device_ip=${encodeURIComponent(selectedDeviceIp)}`);
+            evtSource.onmessage = (e) => {
+                try {
+                    renderNowPlaying(JSON.parse(e.data));
+                } catch (_) { /* ignore malformed frame */ }
+            };
+            // onerror: EventSource reconnects automatically; leave the card as-is meanwhile
+        }
+
+        function selectDevice(ip, name, { toast = false } = {}) {
+            const changed = selectedDeviceIp !== ip;
+            selectedDeviceIp = ip;
+            document.querySelectorAll('.device-card').forEach(c => {
+                c.classList.toggle('active', c.dataset.ip === ip);
+            });
+            setControlling(name);
+            saveState();
+            fetchVolume();
+            connectEvents();
+            if (!speakerModal.hidden) closeSpeakerModal();
+            if (toast) showToast(`Selected speaker: ${name}`);
+        }
+
+        function showToast(message, type = 'success') {
+            toastMessage.textContent = message;
+            toast.className = 'toast show';
+            toastIcon.className = 'fa-solid';
+
+            if (type === 'error') {
+                toast.classList.add('toast-error');
+                toastIcon.classList.add('fa-circle-exclamation');
+            } else {
+                toast.classList.add('toast-success');
+                toastIcon.classList.add('fa-circle-check');
+            }
+
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 4000);
+        }
+
+        function formatDuration(seconds) {
+            if (!seconds) return '0:00';
+            const hrs = Math.floor(seconds / 3600);
+            const mins = Math.floor((seconds % 3600) / 60);
+            const secs = seconds % 60;
+            
+            let result = '';
+            if (hrs > 0) {
+                result += `${hrs}:${mins < 10 ? '0' : ''}`;
+            }
+            result += `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+            return result;
+        }
+
+        // Fetch Devices
+        async function fetchDevices() {
+            refreshBtn.classList.add('spinning');
+            setStatusBadge('scanning', 'Scanning…');
+            devicesContainer.innerHTML = '<div class="empty-devices"><i class="fa-solid fa-spinner fa-spin"></i> Scanning local network…</div>';
+
+            try {
+                const response = await fetch('/api/devices');
+                const devices = await response.json();
+
+                devicesContainer.innerHTML = '';
+
+                if (devices.error) {
+                    setStatusBadge('offline', 'Scan failed');
+                    devicesContainer.innerHTML = `<div class="empty-devices" style="color: #f87171;">Scan Error: ${devices.error}</div>`;
+                    showToast(devices.error, 'error');
+                    return;
+                }
+
+                if (devices.length === 0) {
+                    setStatusBadge('offline', 'No speakers');
+                    devicesContainer.innerHTML = '<div class="empty-devices">No Sonos speakers found. Ensure they are powered on and on the same LAN subnet.</div>';
+                    return;
+                }
+
+                setStatusBadge('online', `${devices.length} speaker${devices.length === 1 ? '' : 's'}`);
+
+                devices.forEach(device => {
+                    const card = document.createElement('div');
+                    card.className = 'device-card';
+                    card.dataset.ip = device.ip;
+                    if (selectedDeviceIp === device.ip) {
+                        card.classList.add('active');
+                    }
+
+                    card.innerHTML = `
+                        <div class="device-icon">
+                            <i class="fa-solid fa-circle-play"></i>
+                        </div>
+                        <div class="device-info">
+                            <div class="device-name">${device.name}</div>
+                            <div class="device-ip">${device.ip}</div>
+                        </div>
+                    `;
+
+                    card.addEventListener('click', () => {
+                        selectDevice(device.ip, device.name, { toast: true });
+                    });
+
+                    devicesContainer.appendChild(card);
+                });
+
+                // Restore the previously-selected speaker if it's still here, else fall back to the first
+                const previous = devices.find(d => d.ip === selectedDeviceIp);
+                if (previous) {
+                    selectDevice(previous.ip, previous.name);
+                } else if (devices.length > 0) {
+                    selectDevice(devices[0].ip, devices[0].name);
+                }
+
+            } catch (err) {
+                setStatusBadge('offline', 'Offline');
+                devicesContainer.innerHTML = '<div class="empty-devices" style="color: #f87171;">Failed to communicate with discovery API</div>';
+                showToast('Failed to discover Sonos devices', 'error');
+            } finally {
+                refreshBtn.classList.remove('spinning');
+            }
+        }
+
+        // Analyze YouTube Video
+        async function analyzeVideo() {
+            const url = ytUrlInput.value.trim();
+            if (!url) {
+                showToast('Please paste a YouTube URL', 'error');
+                return;
+            }
+
+            selectedVideoUrl = url;
+            btnAnalyze.disabled = true;
+            infoPanel.classList.remove('visible');
+            shimmerCard.classList.add('visible');
+
+            try {
+                const response = await fetch(`/api/info?url=${encodeURIComponent(url)}`);
+                const info = await response.json();
+
+                if (info.error) {
+                    showToast(info.error, 'error');
+                    shimmerCard.classList.remove('visible');
+                    return;
+                }
+
+                // Populate Info UI and remember it for next refresh
+                lastVideoInfo = info;
+                renderVideoInfo(info);
+                saveState();
+
+                shimmerCard.classList.remove('visible');
+                infoPanel.classList.add('visible');
+            } catch (err) {
+                showToast('Failed to retrieve video metadata', 'error');
+                shimmerCard.classList.remove('visible');
+            } finally {
+                btnAnalyze.disabled = false;
+            }
+        }
+
+        // Send a track to the selected speaker via /api/play.
+        // Shared by the Play button and history (prev/next/list) navigation.
+        async function castTrack(url, autoplay) {
+            const response = await fetch('/api/play', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    url: url,
+                    device_ip: selectedDeviceIp,
+                    autoplay: autoplay
+                })
+            });
+            const result = await response.json();
+
+            if (result.error) {
+                showToast(result.error, 'error');
+                return null;
+            }
+
+            showToast(`Audio cast successfully to ${result.device}`);
+            // Optimistically show the new track; the SSE stream confirms within ~2s.
+            // Pre-set lastNpTitle so renderNowPlaying doesn't fire a duplicate toast.
+            lastNpTitle = result.title || null;
+            renderNowPlaying({ state: 'PLAYING', title: result.title, device: result.device });
+            return result;
+        }
+
+        // Play stream on Sonos (fresh play from the Play button — records to history)
+        async function playOnSonos() {
+            if (!selectedVideoUrl) {
+                showToast('No video analyzed', 'error');
+                return;
+            }
+
+            if (!selectedDeviceIp) {
+                showToast('Select a speaker first', 'error');
+                return;
+            }
+
+            const originalLabel = btnPlaySonos.innerHTML;
+            btnPlaySonos.disabled = true;
+            btnPlaySonos.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> Casting…';
+
+            try {
+                const result = await castTrack(selectedVideoUrl, autoplayToggle.checked);
+                if (result) {
+                    const info = lastVideoInfo || {};
+                    recordPlay({
+                        url: selectedVideoUrl,
+                        title: result.title || info.title || 'Untitled',
+                        uploader: info.uploader || null,
+                        thumbnail: info.thumbnail || null,
+                        duration: info.duration || null,
+                        id: info.id || null,
+                        ts: Date.now()
+                    });
+                    // Clear the search box now that the track is casting; the
+                    // analysis preview stays put above it to show what's playing.
+                    ytUrlInput.value = '';
+                }
+            } catch (err) {
+                showToast('Failed to play stream on Sonos', 'error');
+            } finally {
+                btnPlaySonos.disabled = false;
+                btnPlaySonos.innerHTML = originalLabel;
+            }
+        }
+
+        // Stop stream
+        async function stopSonos() {
+            btnStopSonos.disabled = true;
+            try {
+                const response = await fetch('/api/stop', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        device_ip: selectedDeviceIp
+                    })
+                });
+                const result = await response.json();
+
+                if (result.error) {
+                    showToast(result.error, 'error');
+                    return;
+                }
+
+                // Keep the controls visible; just reflect the stopped state.
+                // The SSE stream will confirm the idle state within ~2s.
+                nowplayingCard.classList.add('paused');
+                npLabel.textContent = `Idle${result.device ? ' · ' + result.device : selectedDeviceName ? ' · ' + selectedDeviceName : ''}`;
+                npTitle.textContent = '—';
+                lastNpTitle = null;
+                showToast(`Playback stopped on ${result.device || 'Sonos'}`);
+            } catch (err) {
+                showToast('Failed to send stop command', 'error');
+            } finally {
+                btnStopSonos.disabled = false;
+            }
+        }
+
+        // Volume functions
+        async function fetchVolume() {
+            if (!selectedDeviceIp) return;
+            try {
+                const response = await fetch(`/api/volume?device_ip=${selectedDeviceIp}`);
+                const data = await response.json();
+                if (data.error) return;
+
+                volumeSlider.value = data.volume;
+                volumeValue.textContent = data.volume;
+                isMuted = data.mute;
+                updateMuteUI();
+                updateSliderFill();
+                volumePanel.classList.add('visible');
+            } catch (err) {
+                // Silently fail — volume panel just stays hidden
+            }
+        }
+
+        function updateMuteUI() {
+            btnMute.setAttribute('aria-pressed', String(isMuted));
+            if (isMuted) {
+                muteIcon.className = 'fa-solid fa-volume-xmark';
+                btnMute.classList.add('muted');
+            } else {
+                const vol = parseInt(volumeSlider.value);
+                btnMute.classList.remove('muted');
+                if (vol === 0) {
+                    muteIcon.className = 'fa-solid fa-volume-off';
+                } else if (vol < 50) {
+                    muteIcon.className = 'fa-solid fa-volume-low';
+                } else {
+                    muteIcon.className = 'fa-solid fa-volume-high';
+                }
+            }
+        }
+
+        function updateSliderFill() {
+            const val = volumeSlider.value;
+            volumeSlider.setAttribute('aria-valuenow', val);
+            const pct = val + '%';
+            volumeSlider.style.background = `linear-gradient(to right, var(--accent-secondary) 0%, var(--accent-secondary) ${pct}, rgba(255,255,255,0.1) ${pct}, rgba(255,255,255,0.1) 100%)`;
+        }
+
+        async function sendVolume(vol) {
+            if (!selectedDeviceIp) return;
+            try {
+                await fetch('/api/volume', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        device_ip: selectedDeviceIp,
+                        volume: vol
+                    })
+                });
+            } catch (err) {
+                showToast('Failed to set volume', 'error');
+            }
+        }
+
+        volumeSlider.addEventListener('input', () => {
+            const val = volumeSlider.value;
+            volumeValue.textContent = val;
+            updateMuteUI();
+            updateSliderFill();
+
+            // Debounce API call to avoid flooding Sonos
+            clearTimeout(volumeDebounceTimer);
+            volumeDebounceTimer = setTimeout(() => sendVolume(val), 150);
+        });
+
+        btnMute.addEventListener('click', async () => {
+            if (!selectedDeviceIp) return;
+            isMuted = !isMuted;
+            updateMuteUI();
+            try {
+                await fetch('/api/volume', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        device_ip: selectedDeviceIp,
+                        mute: isMuted
+                    })
+                });
+                showToast(isMuted ? 'Speaker muted' : 'Speaker unmuted');
+            } catch (err) {
+                showToast('Failed to toggle mute', 'error');
+            }
+        });
+
+        document.querySelectorAll('.preset-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const vol = btn.dataset.vol;
+                volumeSlider.value = vol;
+                volumeValue.textContent = vol;
+                updateMuteUI();
+                updateSliderFill();
+                sendVolume(vol);
+            });
+        });
+
+        // Listeners
+        refreshBtn.addEventListener('click', fetchDevices);
+        btnAnalyze.addEventListener('click', analyzeVideo);
+        btnPlaySonos.addEventListener('click', playOnSonos);
+        btnStopSonos.addEventListener('click', stopSonos);
+        btnPrev.addEventListener('click', playPrev);
+        btnNext.addEventListener('click', playNext);
+        btnClearHistory.addEventListener('click', clearHistory);
+        historyList.addEventListener('click', (e) => {
+            const row = e.target.closest('.history-item');
+            if (!row) return;
+            castHistoryAt(parseInt(row.dataset.index, 10));
+        });
+
+        // Speaker modal: open from the banner, close via button / backdrop / Escape
+        controllingBar.addEventListener('click', openSpeakerModal);
+        speakerModalClose.addEventListener('click', closeSpeakerModal);
+        speakerModal.addEventListener('click', (e) => {
+            if (e.target === speakerModal) closeSpeakerModal();   // backdrop click
+        });
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && !speakerModal.hidden) closeSpeakerModal();
+        });
+
+        ytUrlInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') analyzeVideo();
+        });
+
+        autoplayToggle.addEventListener('change', saveState);
+
+        // Init — restore prior session, then discover speakers
+        document.addEventListener('DOMContentLoaded', () => {
+            const saved = loadState();
+
+            // Restore browser-side playback history + prev/next cursor
+            loadHistory();
+            renderHistory();
+            updateNavButtons();
+            prefetchNextTrack();   // warm the next autoplay track from restored history
+
+            // Restore the autoplay preference
+            if (typeof saved.autoplay === 'boolean') {
+                autoplayToggle.checked = saved.autoplay;
+            }
+
+            // Restore the selected speaker so Now Playing + Stop work before discovery completes
+            if (saved.deviceIp) {
+                selectedDeviceIp = saved.deviceIp;
+                selectedDeviceName = saved.deviceName || null;
+                setControlling(saved.deviceName || null);
+                fetchVolume();
+                connectEvents();
+            }
+
+            // Restore the last analyzed video preview
+            if (saved.videoUrl) {
+                selectedVideoUrl = saved.videoUrl;
+                ytUrlInput.value = saved.videoUrl;
+            }
+            if (saved.videoInfo) {
+                lastVideoInfo = saved.videoInfo;
+                renderVideoInfo(saved.videoInfo);
+                infoPanel.classList.add('visible');
+            }
+
+            fetchDevices();
+        });
+    </script>
+</body>
+</html>

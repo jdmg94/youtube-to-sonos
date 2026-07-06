@@ -1,0 +1,11 @@
+[Unit]
+Description=YouTube to Sonos Streamer Container
+After=network-online.target
+
+[Container]
+Image=youtube-sonos-streamer:latest
+Network=host
+Environment=PORT=5000
+
+[Install]
+WantedBy=multi-user.target default.target
