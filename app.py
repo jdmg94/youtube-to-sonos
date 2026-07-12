@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import socket
@@ -35,13 +36,21 @@ STREAM_HOST = os.environ.get('STREAM_HOST') or get_local_ip()
 # Shared yt-dlp format selection for audio extraction
 AUDIO_FORMAT = 'bestaudio[acodec=opus]/bestaudio[acodec=vorbis]/bestaudio[ext=m4a]/bestaudio/best'
 
+# Autoplay-station variety tuning (env-overridable, like EVENT_POLL_INTERVAL):
+#   MAX_TRACKS_PER_ARTIST — cap on how many tracks one artist may contribute per
+#                           queue refill, so no single artist dominates.
+#   ARTIST_COOLDOWN       — an artist just heard within this many tracks is
+#                           pushed to the back of the next refill.
+MAX_TRACKS_PER_ARTIST = int(os.environ.get('MAX_TRACKS_PER_ARTIST', 2))
+ARTIST_COOLDOWN = int(os.environ.get('ARTIST_COOLDOWN', 4))
+
 # Tracks what the radio stream is currently playing. Sonos sees one endless
 # "station", so it can't tell us which autoplay track is live — we track it here
 # and surface it through /api/now-playing and the SSE stream.
-CURRENT_STREAM = {"video_id": None, "title": None, "uploader": None, "thumbnail": None}
+CURRENT_STREAM = {"video_id": None, "title": None, "uploader": None, "thumbnail": None, "channel_id": None}
 
 def _reset_current_stream():
-    CURRENT_STREAM.update({"video_id": None, "title": None, "uploader": None, "thumbnail": None})
+    CURRENT_STREAM.update({"video_id": None, "title": None, "uploader": None, "thumbnail": None, "channel_id": None})
 
 def extract_audio(video_id):
     """Return (direct_audio_url, metadata) for a YouTube video id."""
@@ -53,22 +62,107 @@ def extract_audio(video_id):
         "title": info.get('title'),
         "uploader": info.get('uploader'),
         "thumbnail": info.get('thumbnail'),
+        "channel_id": info.get('channel_id'),
     }
     return info['url'], meta
 
 def get_radio_mix(video_id, limit=25):
-    """Ordered list of video ids from YouTube's autoplay radio mix (RD<id>).
+    """Ordered list of track entries from YouTube's autoplay radio mix (RD<id>).
 
-    This is YouTube's own 'up next' / autoplay sequence for a seed video.
+    This is YouTube's own 'up next' / autoplay sequence for a seed video. Each
+    entry is a dict with at least 'id', plus 'title'/'channel_id'/'uploader'
+    used downstream to keep the station varied (see build_station_queue).
     """
     mix_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
     try:
         with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True, 'playlistend': limit}) as ydl:
             info = ydl.extract_info(mix_url, download=False)
-        return [e['id'] for e in (info.get('entries') or []) if e.get('id')]
+        return [e for e in (info.get('entries') or []) if e.get('id')]
     except Exception as e:
         logger.error(f"Failed to fetch radio mix for {video_id}: {e}")
         return []
+
+def _artist_key(entry):
+    """Stable identity for a track's artist, used to prevent one artist from
+    dominating the queue. Prefers the YouTube channel id (unique and reliable);
+    falls back to the normalized channel/uploader name, stripping the auto-
+    generated ' - Topic' suffix so 'Artist' and 'Artist - Topic' collapse."""
+    cid = entry.get('channel_id')
+    if cid:
+        return cid
+    name = (entry.get('uploader') or entry.get('channel') or '').strip()
+    name = re.sub(r'\s*[-–]\s*topic$', '', name, flags=re.IGNORECASE)
+    return name.casefold() or None
+
+def _title_key(title):
+    """Normalize a title so re-uploads of the same song collapse to one key
+    (e.g. '... (Official Video)' vs '... [4K Remaster]'). Artist stays in the
+    key so two different songs that share a name don't wrongly merge."""
+    t = (title or '').casefold()
+    t = re.sub(r'\[[^\]]*\]', ' ', t)   # [4K Remaster], [Lyrics], ...
+    t = re.sub(r'\([^)]*\)', ' ', t)    # (Official Video), (Audio), ...
+    t = re.sub(r'\b(official|video|audio|lyrics?|visualizer|hd|4k|remaster(?:ed)?|mv)\b', ' ', t)
+    t = re.sub(r'[^\w\s]', ' ', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+def _reseed_ids(played_order):
+    """Pick which recently-played tracks to reseed the autoplay mix from.
+
+    Uses the most recent track plus one from a few steps back, so the candidate
+    pool blends 'related to what's playing now' with a slightly different point
+    in the walk — this is the main lever against orbiting one artist."""
+    if not played_order:
+        return []
+    seeds = [played_order[-1]]
+    if len(played_order) >= 4:
+        seeds.append(played_order[-4])
+    return seeds
+
+def build_station_queue(seeds, played_ids, played_titles,
+                        cooldown_artists=(), max_per_artist=MAX_TRACKS_PER_ARTIST):
+    """Build a varied autoplay queue from one or more seed radio mixes.
+
+    Drops already-played tracks and re-uploads of already-played songs, caps how
+    many tracks any one artist contributes, then round-robins across artists so
+    no artist plays back-to-back. Artists heard recently (cooldown_artists) are
+    ordered last, so a fresh artist leads the refill. Returns a list of entries.
+    """
+    cooldown = set(a for a in cooldown_artists if a)
+
+    # 1. Gather candidates across all seed mixes, deduping by id and by song.
+    buckets = {}   # artist_key -> [entries], capped at max_per_artist
+    order = []     # artist_keys in first-seen (mix relevance) order
+    seen_ids = set()
+    seen_titles = set()
+    for seed in seeds:
+        for e in get_radio_mix(seed):
+            vid = e.get('id')
+            if not vid or vid in played_ids or vid in seen_ids:
+                continue
+            tkey = _title_key(e.get('title'))
+            if tkey and (tkey in played_titles or tkey in seen_titles):
+                continue
+            seen_ids.add(vid)
+            if tkey:
+                seen_titles.add(tkey)
+            akey = _artist_key(e) or vid  # unknown artist -> treat as unique
+            if akey not in buckets:
+                buckets[akey] = []
+                order.append(akey)
+            if len(buckets[akey]) < max_per_artist:
+                buckets[akey].append(e)
+
+    # 2. Fresh artists before cooled-down ones (stable sort preserves relevance).
+    order.sort(key=lambda a: a in cooldown)
+
+    # 3. Round-robin across artists -> interleaved, no back-to-back same artist.
+    queue = []
+    while any(buckets[a] for a in order):
+        for a in order:
+            if buckets[a]:
+                queue.append(buckets[a].pop(0))
+    return queue
 
 @app.route('/')
 def index():
@@ -143,10 +237,20 @@ def get_next():
 
     try:
         mix = get_radio_mix(video_id)
-        # Prefer an unplayed track; fall back to any non-seed track so the button
-        # still advances rather than dead-ending once the mix has been exhausted.
-        next_id = (next((vid for vid in mix if vid not in exclude), None)
-                   or next((vid for vid in mix if vid != video_id), None))
+        # The seed's own artist tends to lead its radio mix, so repeatedly hitting
+        # Next marches down one discography. Identify the seed artist (from its own
+        # entry in the mix, if present) and prefer an unplayed track by someone
+        # else, before falling back to any unplayed, then any non-seed track.
+        seed_entry = next((e for e in mix if e.get('id') == video_id), None)
+        seed_artist = _artist_key(seed_entry) if seed_entry else None
+        unplayed = [e for e in mix if e.get('id') not in exclude]
+
+        next_id = (
+            next((e['id'] for e in unplayed
+                  if not seed_artist or _artist_key(e) != seed_artist), None)
+            or next((e['id'] for e in unplayed), None)
+            or next((e['id'] for e in mix if e.get('id') != video_id), None)
+        )
         if not next_id:
             return jsonify({"error": "No autoplay track available"}), 404
 
@@ -446,16 +550,18 @@ def stream(video_id):
     logger.info(f"Received stream request for video_id: {video_id} (autoplay={autoplay})")
 
     def generate():
-        played = set()
-        queue = [video_id]
-        last_played = video_id
+        played_ids = set()          # every video id we've streamed
+        played_titles = set()       # normalized song titles, to reject re-uploads
+        played_order = []           # played ids in order, for choosing reseed points
+        artist_history = []         # artist key per played track, in order
+        queue = [{"id": video_id}]  # entries; the seed starts with just its id
 
         try:
             while queue:
-                vid = queue.pop(0)
-                if vid in played:
+                entry = queue.pop(0)
+                vid = entry.get("id")
+                if not vid or vid in played_ids:
                     continue
-                played.add(vid)
 
                 try:
                     direct_url, meta = extract_audio(vid)
@@ -463,22 +569,39 @@ def stream(video_id):
                     logger.error(f"Skipping {vid}, audio extract failed: {e}")
                     continue
 
+                # A song only counts as "played" once we can actually stream it,
+                # so extraction failures don't poison the anti-repeat filters.
+                played_ids.add(vid)
+                played_order.append(vid)
+                tkey = _title_key(meta.get("title"))
+                if tkey:
+                    played_titles.add(tkey)
+                artist_history.append(_artist_key(meta) or vid)
+
                 CURRENT_STREAM.update(meta)
-                last_played = vid
                 logger.info(f"Radio now playing: {meta.get('title')} ({vid})")
                 yield from transcode_to_mp3(direct_url)
 
                 if not autoplay:
                     break
 
-                # Refill the queue from the most recent track's autoplay mix so
-                # the station keeps flowing into fresh, related suggestions.
+                # Refill the queue with a varied selection. Reseed from more than
+                # one recent track so the station widens instead of marching down
+                # a single artist's discography, and keep recently-heard artists
+                # on cooldown so they don't immediately reappear.
                 if not queue:
-                    for nv in get_radio_mix(last_played):
-                        if nv not in played:
-                            queue.append(nv)
+                    seeds = _reseed_ids(played_order)
+                    cooldown = artist_history[-ARTIST_COOLDOWN:]
+                    queue = build_station_queue(seeds, played_ids, played_titles,
+                                                cooldown_artists=cooldown)
                     if not queue:
-                        logger.info(f"Autoplay mix exhausted after {last_played}; ending station.")
+                        # Nothing new under the artist cap — relax the cap and the
+                        # title filter one last time before ending the station.
+                        queue = build_station_queue(
+                            seeds, played_ids, set(),
+                            cooldown_artists=cooldown, max_per_artist=99)
+                    if not queue:
+                        logger.info(f"Autoplay mix exhausted after {vid}; ending station.")
         except GeneratorExit:
             logger.info(f"Stream client disconnected (seed {video_id})")
         finally:

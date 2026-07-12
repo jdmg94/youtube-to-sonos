@@ -1253,7 +1253,49 @@
             flex-shrink: 0;
         }
 
-        /* ===== Tablet & mobile: stack into a single, page-scrolling column ===== */
+        /* ===== Tablet landscape (two columns, but not a wide desktop): tighten the
+           fixed sidebar so the Stream Controller keeps enough room ===== */
+        @media (min-width: 901px) and (max-width: 1200px) {
+            main {
+                grid-template-columns: 300px 1fr;
+                gap: 1.25rem;
+            }
+            .glass-panel { padding: 1.5rem; }
+        }
+
+        /* ===== Touch devices (tablets / phones): never lock to the viewport. Scroll the
+           page naturally in BOTH orientations and enlarge tap targets. This keeps a
+           landscape tablet usable even when its height is too short for the desktop
+           bento layout, without disturbing the mouse-driven desktop experience. ===== */
+        @media (hover: none) and (pointer: coarse) {
+            body {
+                height: auto;            /* unlock the viewport so the page scrolls naturally */
+                min-height: 100vh;
+                overflow-x: hidden;
+                overflow-y: auto;
+            }
+            main > .glass-panel { overflow-y: visible; }   /* the page scrolls, not the panel */
+            .left-col > .glass-panel { overflow: visible; }
+            /* Size each card to its content; the page carries the scroll */
+            .playback-card,
+            .history-card { flex: 0 0 auto; }
+            .history-list { max-height: 60vh; }             /* keep the feed bounded so the page stays navigable */
+
+            /* Comfortable ~44px finger targets */
+            .np-nav { width: 44px; height: 44px; font-size: 1rem; }
+            .refresh-btn,
+            .modal-close,
+            .mute-btn { width: 44px; height: 44px; }
+            .preset-btn { padding: 0.6rem 0; font-size: 0.8rem; }
+            .device-card { padding: 0.85rem 0.9rem; }
+            .history-item { padding: 0.85rem; }
+            .modal { max-height: 85vh; }
+            /* Larger slider thumb for dragging with a finger */
+            .volume-slider::-webkit-slider-thumb { width: 26px; height: 26px; }
+            .volume-slider::-moz-range-thumb { width: 26px; height: 26px; }
+        }
+
+        /* ===== Tablet portrait & mobile: stack into a single, page-scrolling column ===== */
         @media (max-width: 900px) {
             body {
                 height: auto;            /* unlock the viewport so the page scrolls naturally */
