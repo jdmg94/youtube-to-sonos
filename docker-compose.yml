@@ -14,7 +14,7 @@ services:
       #   docker compose build --build-arg UPDATE_DATE=$(date +%s)
       args:
         UPDATE_DATE: ${UPDATE_DATE:-unknown}
-    image: youtube-sonos-streamer
+    # image: youtube-sonos-streamer
     network_mode: host
     environment:
       PORT: ${PORT:-5000}

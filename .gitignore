@@ -10,3 +10,4 @@ __pycache__
 
 # yt-dlp cookies (live session auth — never commit)
 cookies.txt
+.DS_Store

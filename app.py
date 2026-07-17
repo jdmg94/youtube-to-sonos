@@ -3,6 +3,8 @@ import re
 import json
 import time
 import socket
+import shutil
+import tempfile
 import subprocess
 import logging
 from flask import Flask, jsonify, request, Response, render_template
@@ -39,13 +41,47 @@ AUDIO_FORMAT = 'bestaudio[acodec=opus]/bestaudio[acodec=vorbis]/bestaudio[ext=m4
 # Optional Netscape-format cookies file for yt-dlp, used to get past YouTube's
 # bot / sign-in checks. Defaults to cookies.txt next to app.py; override with
 # COOKIES_FILE. When absent, extraction runs without cookies (prior behavior).
-COOKIES_FILE = os.environ.get('COOKIES_FILE') or os.path.join(
+COOKIES_SRC = os.environ.get('COOKIES_FILE') or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'cookies.txt')
 
+
+def _resolve_cookiefile():
+    """Return a writable cookies path for yt-dlp, or None when unavailable.
+
+    yt-dlp writes the refreshed cookie jar back to `cookiefile` after each
+    extraction. The container mounts the cookies file read-only (docker-compose
+    `:ro`), so pointing yt-dlp straight at the mount fails with
+    `[Errno 30] Read-only file system`. Copy the source once to a writable temp
+    path and hand yt-dlp the copy so it can persist refreshed cookies.
+    """
+    if not os.path.exists(COOKIES_SRC):
+        return None
+    dst = os.path.join(tempfile.gettempdir(), 'yt-sonos-cookies.txt')
+    try:
+        shutil.copyfile(COOKIES_SRC, dst)
+    except OSError as e:
+        logger.warning(f"Could not stage writable cookies copy ({e}); "
+                       "continuing without cookies")
+        return None
+    return dst
+
+
+COOKIES_FILE = _resolve_cookiefile()
+
 def ydl_opts(**extra):
-    """Base yt-dlp options; injects the cookies file when it exists."""
-    opts = {'quiet': True, **extra}
-    if os.path.exists(COOKIES_FILE):
+    """Base yt-dlp options; injects the cookies file when it exists.
+
+    js_runtimes enables both deno (the container's runtime, tried first) and
+    node as a fallback so `make run-local` works on hosts without deno. A JS
+    runtime is required to run the yt-dlp-ejs challenge solvers — without one,
+    YouTube signature/n solving fails and extraction yields no audio formats.
+    """
+    opts = {
+        'quiet': True,
+        'js_runtimes': {'deno': {'path': None}, 'node': {'path': None}},
+        **extra,
+    }
+    if COOKIES_FILE:
         opts['cookiefile'] = COOKIES_FILE
     return opts
 
@@ -669,6 +705,6 @@ def stream(video_id):
 
 if __name__ == '__main__':
     logger.info(f"Initializing app on stream host: {STREAM_HOST} (port {PORT})")
-    if os.path.exists(COOKIES_FILE):
-        logger.info(f"Using yt-dlp cookies file: {COOKIES_FILE}")
+    if COOKIES_FILE:
+        logger.info(f"Using yt-dlp cookies file: {COOKIES_FILE} (copied from {COOKIES_SRC})")
     app.run(host='0.0.0.0', port=PORT, threaded=True)

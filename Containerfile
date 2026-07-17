@@ -18,10 +18,14 @@ COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Layer 3: yt-dlp (frequently updated, isolated)
-# We use a build-arg to force cache invalidation here when updating
+# We use a build-arg to force cache invalidation here when updating.
+# NOTE: the [default] extra pulls in yt-dlp-ejs — the JS challenge-solver
+# scripts YouTube extraction now requires. Without it, signature/n solving
+# fails and only storyboard images come back ("Requested format is not
+# available"). Deno (installed above) is the JS runtime that runs these.
 ARG UPDATE_DATE=unknown
 RUN echo "Update key: ${UPDATE_DATE}" && \
-    pip3 install --no-cache-dir --upgrade yt-dlp
+    pip3 install --no-cache-dir --upgrade "yt-dlp[default]"
 
 # Layer 4: Application code (frequently changed)
 COPY templates/ templates/
