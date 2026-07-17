@@ -1,0 +1,31 @@
+# Works with both Docker (`docker compose`) and Podman (`podman-compose`
+# or `podman compose`).
+#
+# Host networking is REQUIRED: Sonos discovery uses SSDP multicast, which
+# does not cross network namespaces, and the speakers must be able to reach
+# this server to pull the audio stream.
+services:
+  youtube-sonos:
+    build:
+      context: .
+      dockerfile: Containerfile
+      # Bump to force a fresh yt-dlp install (fixes YouTube extractor
+      # breakage / 403s). Same effect as `make update-ytdlp`:
+      #   docker compose build --build-arg UPDATE_DATE=$(date +%s)
+      args:
+        UPDATE_DATE: ${UPDATE_DATE:-unknown}
+    image: youtube-sonos-streamer
+    network_mode: host
+    environment:
+      PORT: ${PORT:-5000}
+      # Override the auto-detected LAN IP if the host has multiple NICs.
+      # Sonos must be able to reach this address to pull the stream.
+      # STREAM_HOST: 192.168.1.50
+    # Optional: yt-dlp cookies to avoid YouTube bot/sign-in checks.
+    # Create cookies.txt in the repo root, then uncomment the mount below.
+    # (Leaving it mounted when the file is missing makes Docker create a
+    # cookies.txt *directory*, which breaks extraction.)
+    # :ro,z = read-only + SELinux relabel (the z is ignored on Docker/macOS).
+    volumes:
+      - ./cookies.txt:/app/cookies.txt:ro,z
+    restart: unless-stopped

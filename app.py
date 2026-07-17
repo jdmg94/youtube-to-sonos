@@ -36,6 +36,55 @@ STREAM_HOST = os.environ.get('STREAM_HOST') or get_local_ip()
 # Shared yt-dlp format selection for audio extraction
 AUDIO_FORMAT = 'bestaudio[acodec=opus]/bestaudio[acodec=vorbis]/bestaudio[ext=m4a]/bestaudio/best'
 
+# Optional Netscape-format cookies file for yt-dlp, used to get past YouTube's
+# bot / sign-in checks. Defaults to cookies.txt next to app.py; override with
+# COOKIES_FILE. When absent, extraction runs without cookies (prior behavior).
+COOKIES_FILE = os.environ.get('COOKIES_FILE') or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'cookies.txt')
+
+def ydl_opts(**extra):
+    """Base yt-dlp options; injects the cookies file when it exists."""
+    opts = {'quiet': True, **extra}
+    if os.path.exists(COOKIES_FILE):
+        opts['cookiefile'] = COOKIES_FILE
+    return opts
+
+# YouTube's #1 failure mode for this server: it decides the host is a bot and
+# blocks extraction (sign-in wall or HTTP 429 rate limit). These are recoverable
+# — usually `make update-ytdlp` or waiting out the rate limit — so we detect them
+# explicitly and surface a clear, actionable message instead of a raw traceback.
+BOT_ERROR_SIGNATURES = (
+    "confirm you're not a bot",
+    "confirm you’re not a bot",   # curly-apostrophe variant yt-dlp sometimes emits
+    "sign in to confirm",
+    "http error 429",
+    "too many requests",
+)
+BOT_ERROR_MESSAGE = (
+    "YouTube is blocking this server as a bot (sign-in required or rate-limited). "
+    "Try `make update-ytdlp`, then wait a few minutes before retrying."
+)
+
+
+def _is_bot_error(err):
+    """True if a yt-dlp failure looks like YouTube bot-detection / rate-limiting."""
+    msg = str(err).lower()
+    return any(sig in msg for sig in BOT_ERROR_SIGNATURES)
+
+
+def _yt_error_response(err, context):
+    """Log a yt-dlp failure and build the client JSON response for an endpoint.
+
+    Bot-detection / rate-limit blocks get a distinct 429, a `bot_detected` flag,
+    and a clear message so they stand out in both the logs and the UI toast;
+    everything else keeps the previous generic 500 with the raw message.
+    """
+    if _is_bot_error(err):
+        logger.error(f"YT-DLP BOT DETECTION during {context}: {err}")
+        return jsonify({"error": BOT_ERROR_MESSAGE, "bot_detected": True}), 429
+    logger.error(f"{context} failed: {err}")
+    return jsonify({"error": str(err)}), 500
+
 # Autoplay-station variety tuning (env-overridable, like EVENT_POLL_INTERVAL):
 #   MAX_TRACKS_PER_ARTIST — cap on how many tracks one artist may contribute per
 #                           queue refill, so no single artist dominates.
@@ -55,7 +104,7 @@ def _reset_current_stream():
 def extract_audio(video_id):
     """Return (direct_audio_url, metadata) for a YouTube video id."""
     url = f"https://www.youtube.com/watch?v={video_id}"
-    with yt_dlp.YoutubeDL({'format': AUDIO_FORMAT, 'noplaylist': True, 'quiet': True}) as ydl:
+    with yt_dlp.YoutubeDL(ydl_opts(format=AUDIO_FORMAT, noplaylist=True)) as ydl:
         info = ydl.extract_info(url, download=False)
     meta = {
         "video_id": info.get('id', video_id),
@@ -75,11 +124,14 @@ def get_radio_mix(video_id, limit=25):
     """
     mix_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
     try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True, 'playlistend': limit}) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts(extract_flat=True, playlistend=limit)) as ydl:
             info = ydl.extract_info(mix_url, download=False)
         return [e for e in (info.get('entries') or []) if e.get('id')]
     except Exception as e:
-        logger.error(f"Failed to fetch radio mix for {video_id}: {e}")
+        if _is_bot_error(e):
+            logger.error(f"YT-DLP BOT DETECTION fetching radio mix for {video_id}: {e}")
+        else:
+            logger.error(f"Failed to fetch radio mix for {video_id}: {e}")
         return []
 
 def _artist_key(entry):
@@ -201,12 +253,7 @@ def get_info():
     
     try:
         logger.info(f"Fetching metadata for URL: {url}")
-        ydl_opts = {
-            'format': 'bestaudio[acodec=opus]/bestaudio[acodec=vorbis]/bestaudio[ext=m4a]/bestaudio/best',
-            'noplaylist': True,
-            'quiet': True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts(format=AUDIO_FORMAT, noplaylist=True)) as ydl:
             info = ydl.extract_info(url, download=False)
             return jsonify({
                 'title': info.get('title'),
@@ -216,8 +263,7 @@ def get_info():
                 'uploader': info.get('uploader')
             })
     except Exception as e:
-        logger.error(f"Failed to fetch metadata: {e}")
-        return jsonify({"error": str(e)}), 500
+        return _yt_error_response(e, "metadata fetch")
 
 @app.route('/api/next', methods=['GET'])
 def get_next():
@@ -254,7 +300,7 @@ def get_next():
         if not next_id:
             return jsonify({"error": "No autoplay track available"}), 404
 
-        with yt_dlp.YoutubeDL({'format': AUDIO_FORMAT, 'noplaylist': True, 'quiet': True}) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts(format=AUDIO_FORMAT, noplaylist=True)) as ydl:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={next_id}", download=False)
         return jsonify({
             'url': f"https://youtu.be/{next_id}",
@@ -265,8 +311,7 @@ def get_next():
             'uploader': info.get('uploader'),
         })
     except Exception as e:
-        logger.error(f"Failed to resolve next autoplay track for {video_id}: {e}")
-        return jsonify({"error": str(e)}), 500
+        return _yt_error_response(e, f"next-track resolve for {video_id}")
 
 @app.route('/api/play', methods=['POST'])
 def play():
@@ -281,7 +326,7 @@ def play():
     try:
         # 1. Fetch info to get video ID and Title
         logger.info(f"Preparing to play. Fetching info for: {url} (autoplay={autoplay})")
-        with yt_dlp.YoutubeDL({'format': AUDIO_FORMAT, 'noplaylist': True, 'quiet': True}) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts(format=AUDIO_FORMAT, noplaylist=True)) as ydl:
             info = ydl.extract_info(url, download=False)
             video_id = info.get('id')
             title = info.get('title', 'YouTube Stream')
@@ -323,8 +368,7 @@ def play():
             "title": title
         })
     except Exception as e:
-        logger.error(f"Play command failed: {e}")
-        return jsonify({"error": str(e)}), 500
+        return _yt_error_response(e, "play command")
 
 @app.route('/api/stop', methods=['POST'])
 def stop():
@@ -566,7 +610,12 @@ def stream(video_id):
                 try:
                     direct_url, meta = extract_audio(vid)
                 except Exception as e:
-                    logger.error(f"Skipping {vid}, audio extract failed: {e}")
+                    if _is_bot_error(e):
+                        # Silent skips here mean a dead station with no user-facing
+                        # error, so make the real cause unmissable in the logs.
+                        logger.error(f"YT-DLP BOT DETECTION streaming {vid} (seed {video_id}): {e}")
+                    else:
+                        logger.error(f"Skipping {vid}, audio extract failed: {e}")
                     continue
 
                 # A song only counts as "played" once we can actually stream it,
@@ -620,4 +669,6 @@ def stream(video_id):
 
 if __name__ == '__main__':
     logger.info(f"Initializing app on stream host: {STREAM_HOST} (port {PORT})")
+    if os.path.exists(COOKIES_FILE):
+        logger.info(f"Using yt-dlp cookies file: {COOKIES_FILE}")
     app.run(host='0.0.0.0', port=PORT, threaded=True)

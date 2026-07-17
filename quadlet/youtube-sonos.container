@@ -6,6 +6,10 @@ After=network-online.target
 Image=youtube-sonos-streamer:latest
 Network=host
 Environment=PORT=5000
+# yt-dlp cookies (avoids YouTube bot/sign-in checks). Set to the ABSOLUTE host
+# path of cookies.txt in your repo checkout — the system service can't resolve
+# relative paths. Read-only; :z handles SELinux relabeling.
+Volume=/ABSOLUTE/PATH/TO/repo/cookies.txt:/app/cookies.txt:ro,z
 
 [Install]
 WantedBy=multi-user.target default.target

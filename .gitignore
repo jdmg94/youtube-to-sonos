@@ -7,3 +7,6 @@ __pycache__
 *.pyo
 *.pyd
 .db
+
+# yt-dlp cookies (live session auth — never commit)
+cookies.txt

@@ -7,7 +7,8 @@ build:
 	podman build -t $(IMAGE_NAME) .
 
 run:
-	podman run -it --rm --network=host -e PORT=$(PORT) $(IMAGE_NAME)
+	podman run -it --rm --network=host -e PORT=$(PORT) \
+		-v ./cookies.txt:/app/cookies.txt:ro,z $(IMAGE_NAME)
 
 update-ytdlp:
 	podman build --build-arg UPDATE_DATE=$$(date +%s) -t $(IMAGE_NAME) .

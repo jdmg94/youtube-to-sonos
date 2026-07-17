@@ -13,3 +13,5 @@ Makefile
 README.md
 .gemini
 antigravity-ide
+# yt-dlp cookies are delivered via read-only volume mount, not baked into the image
+cookies.txt

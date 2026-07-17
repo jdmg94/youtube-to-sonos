@@ -123,6 +123,7 @@ All configuration is via environment variables — set them in the Quadlet file
 | STREAM_HOST  | (auto)   | LAN IP sent to Sonos as stream origin. Set this if your   |
 |              |          | server has multiple NICs and auto-detection picks the     |
 |              |          | wrong one (e.g. a management or VM bridge interface).     |
+| COOKIES_FILE | cookies.txt | Path to a yt-dlp cookies file (see Cookies below).     |
 
 ### Finding the right IP
 
@@ -156,6 +157,36 @@ layer so you can update it without invalidating the heavier ffmpeg/soco layers:
 make update-ytdlp
 sudo systemctl restart youtube-sonos
 ```
+
+---
+
+## Cookies (avoiding YouTube bot checks)
+
+YouTube increasingly answers requests from servers with "Sign in to confirm
+you're not a bot" / HTTP 403. For all-day / autoplay-station use, give yt-dlp a
+cookies file exported from a logged-in browser session.
+
+1. Export cookies for `youtube.com` in **Netscape format** using a browser
+   extension (e.g. "Get cookies.txt"). Tip: export from an **incognito/private
+   window**, then close it without logging out — otherwise YouTube may rotate the
+   session and invalidate the exported cookies.
+2. Save the file as `cookies.txt` at the repo root. It is gitignored (it holds
+   live session auth — never commit it) and excluded from the image build
+   context; it's delivered to the container by a read-only volume mount instead.
+
+Cookies are **optional** — without the file, extraction runs exactly as before.
+
+- **Local / `make run-local`**: the app reads `cookies.txt` from the project root
+  automatically. On startup you'll see `Using yt-dlp cookies file: ...` in the log.
+- **Container (`make run`)**: the file is mounted read-only at `/app/cookies.txt`;
+  it must exist in the repo root before you run.
+- **Quadlet service**: edit `Volume=` in
+  `/etc/containers/systemd/youtube-sonos.container` to the **absolute** host path
+  of your `cookies.txt` (a system service can't resolve relative paths), then
+  `sudo systemctl daemon-reload && sudo systemctl restart youtube-sonos`.
+
+Cookies expire; refresh `cookies.txt` when bot checks return (no rebuild needed
+with the volume mount).
 
 ---
 
