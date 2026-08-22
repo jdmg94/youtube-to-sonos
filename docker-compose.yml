@@ -9,23 +9,35 @@ services:
     build:
       context: .
       dockerfile: Containerfile
-      # Bump to force a fresh yt-dlp install (fixes YouTube extractor
-      # breakage / 403s). Same effect as `make update-ytdlp`:
-      #   docker compose build --build-arg UPDATE_DATE=$(date +%s)
+      # MUST be bumped to pick up a new yt-dlp. It keys the yt-dlp layer, so
+      # while it stays "unknown" every rebuild reuses the layer built the very
+      # first time and yt-dlp is never updated — the usual cause of 403s and
+      # extraction failures. Use:
+      #   UPDATE_DATE=$(date +%s) docker compose up -d --build
+      # or: make docker-update-ytdlp
       args:
         UPDATE_DATE: ${UPDATE_DATE:-unknown}
     # image: youtube-sonos-streamer
     network_mode: host
     environment:
       PORT: ${PORT:-5000}
+      # Escape hatch for YouTube 403s: pick the player client yt-dlp asks.
+      # Unset = yt-dlp's own default. e.g. "tv" or "default,-web".
+      YTDLP_PLAYER_CLIENT: "${YTDLP_PLAYER_CLIENT:-}"
       # Override the auto-detected LAN IP if the host has multiple NICs.
       # Sonos must be able to reach this address to pull the stream.
       # STREAM_HOST: 192.168.1.50
-    # Optional: yt-dlp cookies to avoid YouTube bot/sign-in checks.
-    # Create cookies.txt in the repo root, then uncomment the mount below.
-    # (Leaving it mounted when the file is missing makes Docker create a
-    # cookies.txt *directory*, which breaks extraction.)
+    # yt-dlp cookies, delivered by mount rather than baked into the image
+    # (.containerignore keeps them out of the build context — they are live
+    # session auth). The file MUST exist before `up`: when the source of a bind
+    # mount is missing, Docker creates a root-owned *directory* in its place and
+    # extraction silently runs unauthenticated. To run without cookies, comment
+    # the mount out AND set COOKIES_FILE: "" — the empty value is what tells the
+    # app the absence is deliberate.
     # :ro,z = read-only + SELinux relabel (the z is ignored on Docker/macOS).
     volumes:
       - ./cookies.txt:/app/cookies.txt:ro,z
+      # Downloaded songs. Persisting this is the whole point of the cache:
+      # a re-listen costs zero YouTube requests. Writable, so no :ro here.
+      - ./cache:/app/cache:z
     restart: unless-stopped

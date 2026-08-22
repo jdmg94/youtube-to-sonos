@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Flask app that streams YouTube audio to Sonos speakers on the LAN. It runs as a Podman container on a Fedora server (systemd Quadlet), but can also run locally.
+Flask app that plays YouTube audio on Sonos speakers on the LAN. Songs are downloaded and transcoded to a local disk cache ahead of time, and Sonos plays them from a real queue of per-track URLs served by this app. It runs as a Podman container on a Fedora server (systemd Quadlet), but can also run locally.
 
 ## Commands
 
@@ -24,14 +24,96 @@ Note: `app.py` defaults to `PORT=8080` when run directly, but the Makefile, Cont
 
 Everything lives in two files: `app.py` (backend) and `templates/index.html` (single-page UI with inline CSS/JS, ~2300 lines).
 
-### Streaming pipeline (the core flow)
+### Playback pipeline (the core flow)
 
-1. `POST /api/play` — resolves the YouTube video via yt-dlp, picks a Sonos speaker (soco), and tells it to play `http://STREAM_HOST:PORT/stream/<video_id>.mp3?autoplay=...` via UPnP (`play_uri` with `force_radio=True`). The Sonos speaker then pulls the stream directly from this server.
-2. `GET /stream/<video_id>.mp3` (app.py:441) — a generator that yt-dlp-extracts the direct audio URL, pipes it through `ffmpeg` to chunked MP3 (`transcode_to_mp3`), and yields it. With `autoplay=1` (default), when a track ends it refills its queue from YouTube's radio mix (`RD<video_id>` playlist via `get_radio_mix`) and keeps streaming as one endless "station".
+1. `POST /api/play` — resolves the seed video (preferring a cache sidecar over a yt-dlp call), clears the speaker's queue, starts the download, enqueues the seed with DIDL metadata, waits for the seed's first bytes, and calls `play_from_queue(0)`. No `force_radio` — each queue item is a real track.
+   The wait (`_wait_for_first_bytes`, `PLAY_START_TIMEOUT`) is not optional politeness: Sonos opens `/media` the instant it is told to play and hangs up well before our own `MEDIA_START_TIMEOUT` (120s) is up, so a cold seed — yt-dlp resolve, deno, ffmpeg startup — used to leave the speaker parked on the track without playing it, indistinguishable to the listener from "the Play button did nothing". `_ensure_playing` then confirms the speaker reached `PLAYING` and nudges it once with a bare `Play` if it didn't, reporting the outcome as `started` so the UI doesn't paint a Now Playing card for silence.
+   **Unless the speaker is already playing**: then `_queue_after_current` inserts the seed directly after the current track (`add_to_queue(position=…)`) at prefetch priority and returns `{"status": "queued", "queued_next": true}` — nothing is cleared, nothing is interrupted, and the track downloads while the current one finishes. `mode` in the body forces the choice (`now` / `next`); `auto` (default) decides from the transport state. `mode: "next"` still falls back to playing now when `_queue_position` reports 0 — the speaker is on line-in, TV, or a radio stream, so there is no queue item to sit behind.
+2. `ensure_cached(video_id, priority=...)` → `_download` on `_SCHED` (see **Download scheduling**) — yt-dlp resolves the direct URL *and its `http_headers`*, ffmpeg transcodes it to `CACHE_DIR/<id>.mp3` (via `.part` + atomic rename) with ID3 tags and embedded cover art, and writes an `<id>.json` sidecar plus an `<id>.jpg` thumbnail.
+3. `GET /media/<id>.mp3` — what Sonos actually pulls. A complete file is served with `Content-Length` + Range support (so the speaker can seek); an incomplete one is tail-served chunked while the download continues, which is how a cold start or a jump backwards still begins in seconds.
+
+### Download scheduling
+
+`_Scheduler` (replacing a plain `ThreadPoolExecutor`) dispatches downloads by **priority = distance from what the speaker needs**: `PRIORITY_MEDIA` (-1) for an open `/media` socket, `0` for the track under the cursor, `N` for N tracks ahead. Lower wins.
+
+With `PREFETCH_GATE` on (default), prefetch downloads are held **off the wire entirely** while an urgent (`<= URGENT_PRIORITY_MAX`) download is in flight, so the track the listener is waiting on gets the whole uplink rather than sharing it with the lookahead window. The gate is evaluated at *dispatch* — `_take` peeks the heap head and parks without consuming a worker — which is why a gated job can't deadlock the urgent job it's waiting for. A FIFO executor could do neither this nor re-ordering, which is why it's gone.
+
+`_reprioritize(station)` re-orders queued jobs when the cursor moves (station loop, and `/api/transport` `jump` so the user doesn't wait out a poll). It deliberately **never** calls `ensure_cached` — that would resurrect every evicted track behind the cursor and re-download the back window every tick.
+
+`_top_up` is ramped: while the cursor track is still downloading the lookahead is `PREFETCH_WARMUP_AHEAD` (1) instead of `WINDOW_AHEAD` (8), capped at `TOPUP_BATCH` new tracks per tick, with `PREFETCH_WARMUP_MAX_TICKS` as a hard escape. This matters because resolving a track means yt-dlp round trips *synchronously inside the station loop*.
+
+`end_station` cancels the outgoing station's *queued* jobs so a fresh `/api/play` doesn't compete with prefetches nobody will hear — but it skips ids another live station still lists, and marks what it does cancel via `Download.cancel()` (penalty-free, unlike `finish('failed')`). Leaving them `queued` would be worse than a leak: `_is_active` would report them live forever and stall the other station's `_flush_queue`.
+
+`GET /api/downloads` exposes what's running, what's queued and at what priority — without it, "prefetch politely waiting" and "scheduler wedged" look identical.
+
+Lock discipline: `_Scheduler._cv` is a **leaf**. Nothing held under it may take `_STATE_LOCK` or a `Download.cond`; `_STATE_LOCK -> _Scheduler._cv` is the only legal ordering.
+
+A `Download` is `queued` → `running` → `done`/`failed`. **`ACTIVE_STATES` covers both `queued` and `running`** — treating only `running` as live is the easy way to introduce a silent hang (eviction deleting a pending track, `_flush_queue` racing ahead, `_serve_tail` truncating a stream). `_download` guarantees no path leaves a `Download` stuck `running`: one that does wedges `_flush_queue` permanently and hangs every `/media` reader.
+
+### Why yt-dlp downloads and ffmpeg only transcodes
+
+ffmpeg no longer fetches googlevideo. With a current yt-dlp it could — a fresh
+URL serves an open-ended `Range: bytes=0-` fine, even to ffmpeg's default
+`Lavf/*` UA. The problem is what happens when yt-dlp goes stale: the URLs it
+still manages to produce can refuse open-ended ranges with 403 (exactly what
+ffmpeg sends on open, while bounded ranges return 206 with no UA at all), or
+serve only their first 1 MiB and 403 permanently past that offset. Both were
+observed in the wild; both surfaced as an opaque ffmpeg 403 that no header or
+reconnect setting could fix, and neither was about request identity.
+
+So `_ytdlp_source_cmd` runs yt-dlp in a child with the parent's exact
+`ydl_opts` (JSON-passed, so cookies / player-client / js-runtime settings can't
+drift) writing media to stdout with `logtostderr` on, and `_run_transcode`
+pipes that into `ffmpeg -i pipe:0`. This puts every YouTube quirk behind the
+one dependency that gets fixed when YouTube changes, and makes failures report
+yt-dlp's own error instead of ffmpeg's.
+
+`extract_audio` still resolves each track, but **for metadata only** — its URL
+is never fetched. That costs a second extraction per download; worth revisiting
+if YouTube request volume becomes a problem.
+
+**A stale yt-dlp is the default suspect for any download failure**, and it hides
+well: yt-dlp sits in its own image layer keyed on the `UPDATE_DATE` build-arg,
+so an ordinary rebuild reuses the cached layer and silently keeps whatever
+version was installed first. `_log_ytdlp_version` prints the version at startup
+and shouts past `YTDLP_STALE_DAYS` (14 days — YouTube retires a player dialect
+in far less than a month).
+
+Failures are sorted into three classes, because each has a different fix and
+YouTube's own wording points at none of them: `_is_bot_error` (sign-in wall /
+429 → wait it out), `_is_forbidden_error` (googlevideo 403 on the media URL),
+and `_is_player_error` — "The page needs to be reloaded", "not available on this
+app", no player response — which means YouTube refused the *session* yt-dlp
+opened, i.e. the extractor is out of date. The downloader stops after the second
+player error instead of burning all `DOWNLOAD_ATTEMPTS`: the retry re-runs the
+same extractor against the same YouTube, so it fails identically, and three
+resolves per track is how a stale extractor earns a rate-limit block on top.
+
+Cookies are **optional**: present at `cookies.txt` they are used, absent the app
+runs unauthenticated, and `COOKIES_FILE=""` disables them explicitly (which is
+what distinguishes a deliberate absence from an accident, so the log can stay
+quiet about the former). `_resolve_cookiefile` stages a writable copy, because
+the mount is read-only and yt-dlp writes its refreshed jar back — meaning
+refreshed cookies do not persist to the host and sessions eventually expire.
+Never mount a `cookies.txt` that doesn't exist: Docker/Podman create a
+root-owned *directory* in its place and cookies vanish silently, so the resolver
+rejects a non-file path with a loud error naming the fix.
+
+### Station state
+
+Nothing is prefetched until the loop has seen the speaker report `PLAYING` (`station.playing_seen`). Resolving the next track is a synchronous yt-dlp round trip and its download wants uplink; both belong to the seed until the listener is actually hearing something.
+
+`Station` (one per speaker IP, in the `STATION` dict) is the authoritative ordered track list plus the cursor. A daemon `_station_loop` thread per station polls the speaker's `playlist_position` — it has to run independently of any browser, since Sonos advances its own queue. Each tick it calls `_reprioritize` (re-order queued downloads around the new cursor), `_top_up` (extend and download toward `WINDOW_AHEAD` tracks, choosing them with the existing `_reseed_ids` / `build_station_queue` variety logic), `_flush_queue` (enqueue finished downloads in order; drop failed ones), and `_evict` (delete cached audio outside `-WINDOW_BEHIND` / `+WINDOW_AHEAD`).
+
+The Sonos queue is deliberately **never trimmed** mid-session — removing items renumbers `playlist_position`. Only files obey the window; stepping back past it re-downloads through `/media`. A play-next *insert* renumbers it too, which is safe only because `Station.add(entry, at=…)` inserts at the same index in `tracks`: index `i < enqueued` is queue position `i + 1`, and that correspondence is what every position calculation assumes.
+
+`Station.lock` serialises the only two writers that can reorder those lists — the station loop's `_flush_queue` and a play-next insert on a request thread. Without it the insert can shift `tracks` between `_flush_queue`'s lookup and its `add_to_queue`, leaving list and queue off by one for the rest of the session. It is taken **outside** `_STATE_LOCK`: the full order is `Station.lock -> _STATE_LOCK -> _Scheduler._cv`.
+
+All shared state (`STATION`, `_DOWNLOADS`, `_INUSE`, `_MIX_CACHE`) is guarded by `_STATE_LOCK` and lives in-process, so the app must stay single-process/threaded.
 
 ### Now-playing state
 
-Sonos only sees one endless radio URL, so it can't report which autoplay track is live. The module-level `CURRENT_STREAM` dict (app.py:41) is updated by the stream generator and merged into `/api/now-playing` responses and the `/api/events` SSE stream (server polls the speaker and emits only on state change). This is why the app is single-process/threaded — `CURRENT_STREAM` is shared in-process state.
+Because each queue item is a real tagged file, `_now_playing_payload` reads title/artist/artwork/duration straight from `speaker.get_current_track_info()`. `_video_id_from_uri` recognises our own `/media/<id>.mp3` URIs. `/api/events` (SSE) polls the speaker and emits on payload change, carrying the station list and per-track cache status on the same connection.
 
 ### Sonos discovery
 
@@ -39,7 +121,11 @@ Sonos only sees one endless radio URL, so it can't report which autoplay track i
 
 ### Other endpoints
 
-`/api/devices` (SSDP scan), `/api/info` (metadata only), `/api/next` (resolve next autoplay track, excluding already-played ids passed by the client), `/api/stop`, `/api/volume` (GET/POST). Most endpoints fall back to the first discovered speaker when `device_ip` is omitted.
+`/api/devices` (SSDP scan), `/api/downloads` (scheduler introspection), `/api/info` (metadata only), `/api/play` (`mode`: `auto`/`now`/`next`), `/api/transport` (POST: next/prev/play/pause/seek/jump against the speaker's own queue), `/api/station` (ordered list + cursor + per-track cache status), `/api/stop` (also tears down the station so it stops prefetching), `/api/volume` (GET/POST), `/media/<id>.jpg` (album art — Sonos won't fetch YouTube's CDN). Most endpoints fall back to the first discovered speaker when `device_ip` is omitted. Queue and transport commands always go through `_coordinator()`, since they must target the group coordinator.
+
+### Cache layout
+
+`CACHE_DIR` (default `/app/cache`, must be a persistent writable mount) holds `<id>.mp3`, `<id>.json` (metadata sidecar) and `<id>.jpg`. Sidecars and artwork are never evicted — they're tiny, and keeping them means a re-listen needs only the audio. `cache_scan()` at startup deletes stray `.part` files and backfills missing sidecars.
 
 ### Container layering
 

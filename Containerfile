@@ -27,6 +27,13 @@ ARG UPDATE_DATE=unknown
 RUN echo "Update key: ${UPDATE_DATE}" && \
     pip3 install --no-cache-dir --upgrade "yt-dlp[default]"
 
+# Audio cache. Mount a host directory or named volume here so downloaded songs
+# survive restarts — otherwise every restart re-downloads from YouTube, which is
+# exactly the bot-detection risk the cache exists to avoid. Deliberately no
+# VOLUME directive: that would create a throwaway anonymous volume on every run.
+RUN mkdir -p /app/cache
+ENV CACHE_DIR=/app/cache
+
 # Layer 4: Application code (frequently changed)
 COPY templates/ templates/
 COPY app.py .

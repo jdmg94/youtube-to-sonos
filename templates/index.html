@@ -1006,7 +1006,7 @@
             color: var(--text-muted);
         }
 
-        /* Recently played history */
+        /* Station queue list */
         .history-header {
             display: flex;
             align-items: center;
@@ -1429,13 +1429,14 @@
             </div>
         </section>
 
-        <!-- Recently played: browser-side history; the list scrolls within this card -->
+        <!-- The station: what has played, what's on now, and what's downloaded
+             and queued ahead. Mirrors the server's list; scrolls within the card. -->
         <section class="glass-panel sidebar history-card" id="history-panel">
             <div class="history-header">
                 <span class="history-title-label">
-                    <i class="fa-solid fa-clock-rotate-left" aria-hidden="true"></i> Recently played
+                    <i class="fa-solid fa-list-ul" aria-hidden="true"></i> Queue
                 </span>
-                <button class="history-clear" id="btn-clear-history">Clear</button>
+                <button class="history-clear" id="btn-clear-history">Stop</button>
             </div>
             <div class="history-list" id="history-list"></div>
         </section>
@@ -1527,8 +1528,7 @@
 
     <script>
         const STORAGE_KEY = 'yts_state_v1';
-        const HISTORY_KEY = 'yts_history_v1';
-        const HISTORY_CAP = 50;
+        const LEGACY_HISTORY_KEY = 'yts_history_v1';   // replaced by the server-side station
         let selectedDeviceIp = null;
         let selectedDeviceName = null;
         let selectedVideoUrl = null;
@@ -1536,11 +1536,10 @@
         let evtSource = null;
         let evtDeviceIp = null;
         let lastNpTitle = null;
-        let playHistory = [];      // chronological log of played tracks (oldest → newest)
-        let historyIndex = -1;     // cursor into playHistory for prev/next navigation
-        // Eagerly-resolved next autoplay track so the Next button has zero latency.
-        // { seedId, promise } — the in-flight/settled /api/next call for the current track.
-        let prefetchedNext = null;
+        // The server owns the playlist now: it downloads tracks ahead of time and
+        // drives the speaker's own queue. This is a read-only mirror of
+        // /api/station, refreshed over SSE.
+        let station = { index: 0, tracks: [], exhausted: false };
 
         // Dom Elements
         const statusDot = document.getElementById('status-dot');
@@ -1638,196 +1637,98 @@
             }
         }
 
-        // --- Playback history: a browser-side log of played tracks with prev/next navigation ---
-        function loadHistory() {
-            try {
-                const data = JSON.parse(localStorage.getItem(HISTORY_KEY)) || {};
-                playHistory = Array.isArray(data.items) ? data.items : [];
-                historyIndex = Number.isInteger(data.index) ? data.index : playHistory.length - 1;
-                if (historyIndex >= playHistory.length) historyIndex = playHistory.length - 1;
-            } catch (e) {
-                playHistory = [];
-                historyIndex = -1;
-            }
-        }
-
-        function saveHistory() {
-            try {
-                localStorage.setItem(HISTORY_KEY, JSON.stringify({ items: playHistory, index: historyIndex }));
-            } catch (e) { /* storage may be unavailable; non-fatal */ }
-        }
-
-        // Append a freshly played track and point the cursor at it (skips consecutive duplicates).
-        function recordPlay(entry) {
-            const current = playHistory[historyIndex];
-            if (current && current.url === entry.url) {
-                // Same track replayed in place — just refresh its metadata/timestamp
-                playHistory[historyIndex] = entry;
-            } else {
-                playHistory.push(entry);
-                if (playHistory.length > HISTORY_CAP) playHistory.shift();
-                historyIndex = playHistory.length - 1;
-            }
-            saveHistory();
-            renderHistory();
-            updateNavButtons();
-            // Warm up the next autoplay track now so clicking Next is instant.
-            prefetchNextTrack();
-        }
-
-        // Kick off the /api/next resolution for the current track in the background.
-        // Keyed by the current track's id so we only fetch once per track; the result
-        // is consumed by playNextAutoplay() with no extra latency when Next is clicked.
-        function prefetchNextTrack() {
-            // Only the track at the end of history seeds an autoplay Next; stepping
-            // through earlier history is instant and needs no prefetch.
-            if (historyIndex !== playHistory.length - 1) return;
-            const current = playHistory[historyIndex];
-            if (!current || !current.id) return;
-            if (prefetchedNext && prefetchedNext.seedId === current.id) return; // already warming
-            const exclude = playHistory.map(e => e.id).filter(Boolean).join(',');
-            const seedId = current.id;
-            const promise = fetch(`/api/next?video_id=${encodeURIComponent(seedId)}`
-                    + `&exclude=${encodeURIComponent(exclude)}`)
-                .then(r => r.json())
-                .catch(() => null);
-            prefetchedNext = { seedId, promise };
-        }
-
-        // Re-cast the track at a given history position on the current speaker.
-        async function castHistoryAt(index) {
-            if (index < 0 || index >= playHistory.length) return;
+        // --- Station: the server-side playlist mirrored for display ---------
+        // The server keeps the Sonos queue filled with pre-downloaded tracks, so
+        // prev/next are plain transport commands against the speaker rather than
+        // a re-resolve + re-cast of a whole new stream.
+        async function sendTransport(action, extra = {}) {
             if (!selectedDeviceIp) {
                 showToast('Select a speaker first', 'error');
+                return null;
+            }
+            try {
+                const response = await fetch('/api/transport', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ device_ip: selectedDeviceIp, action, ...extra })
+                });
+                const result = await response.json();
+                if (result.error) {
+                    showToast(result.error, 'error');
+                    return null;
+                }
+                return result;
+            } catch (err) {
+                showToast('Speaker did not respond', 'error');
+                return null;
+            }
+        }
+
+        async function refreshStation() {
+            if (!selectedDeviceIp) {
+                applyStation({ index: 0, tracks: [], exhausted: false });
                 return;
             }
-            const entry = playHistory[index];
-            historyIndex = index;
-            selectedVideoUrl = entry.url;
-            lastVideoInfo = entry;
-            ytUrlInput.value = entry.url;
-            renderVideoInfo(entry);
-            infoPanel.classList.add('visible');
-            saveState();
-            saveHistory();
-            renderHistory();
-            updateNavButtons();
-            // If we've stepped back to the end, warm the next autoplay track.
-            prefetchNextTrack();
             try {
-                await castTrack(entry.url, autoplayToggle.checked);
-            } catch (err) {
-                showToast('Failed to play stream on Sonos', 'error');
-            }
+                const response = await fetch(`/api/station?device_ip=${encodeURIComponent(selectedDeviceIp)}`);
+                applyStation(await response.json());
+            } catch (err) { /* the SSE feed will catch us up */ }
+        }
+
+        function applyStation(data) {
+            if (!data || !Array.isArray(data.tracks)) return;
+            station = { index: data.index || 0, tracks: data.tracks, exhausted: !!data.exhausted };
+            renderStation();
+            updateNavButtons();
         }
 
         function playPrev() {
-            if (historyIndex > 0) castHistoryAt(historyIndex - 1);
+            sendTransport('prev');
         }
 
         function playNext() {
-            // Mid-history: step forward through already-played tracks.
-            if (historyIndex < playHistory.length - 1) {
-                castHistoryAt(historyIndex + 1);
-                return;
-            }
-            // At the end: pull a fresh track from the current track's autoplay mix.
-            playNextAutoplay();
+            sendTransport('next');
         }
 
-        // Skip forward into YouTube's autoplay station: fetch the next related
-        // track for whatever is currently playing, then cast it as a new seed.
-        async function playNextAutoplay() {
-            const current = playHistory[historyIndex];
-            if (!current || !current.id) {
-                showToast('Nothing playing to find a next track for', 'error');
+        // Jump straight to a track the server has already queued.
+        function jumpToTrack(index) {
+            const track = station.tracks[index];
+            if (!track) return;
+            if (track.queue_pos === null || track.queue_pos === undefined) {
+                showToast(track.cached === 'failed'
+                    ? "That track couldn't be downloaded"
+                    : 'That track is still downloading', 'error');
                 return;
             }
-            if (!selectedDeviceIp) {
-                showToast('Select a speaker first', 'error');
-                return;
-            }
-
-            const originalDisabled = btnNext.disabled;
-            btnNext.disabled = true;
-            try {
-                // Use the track we eagerly prefetched for the current seed if it's
-                // ready; otherwise resolve it now. Either way, consume the prefetch.
-                const played = new Set(playHistory.map(e => e.id).filter(Boolean));
-                let data = null;
-                if (prefetchedNext && prefetchedNext.seedId === current.id) {
-                    data = await prefetchedNext.promise;
-                    prefetchedNext = null;
-                    // Guard against a stale suggestion we've since played.
-                    if (data && data.id && played.has(data.id)) data = null;
-                }
-                if (!data || data.error || !data.url) {
-                    // Exclude everything already played so the mix keeps moving forward.
-                    const exclude = playHistory.map(e => e.id).filter(Boolean).join(',');
-                    const resp = await fetch(`/api/next?video_id=${encodeURIComponent(current.id)}`
-                        + `&exclude=${encodeURIComponent(exclude)}`);
-                    data = await resp.json();
-                }
-                if (data.error || !data.url) {
-                    showToast(data.error || 'No next track found', 'error');
-                    return;
-                }
-
-                selectedVideoUrl = data.url;
-                lastVideoInfo = data;
-                ytUrlInput.value = data.url;
-                renderVideoInfo(data);
-                infoPanel.classList.add('visible');
-
-                const result = await castTrack(data.url, autoplayToggle.checked);
-                if (result) {
-                    recordPlay({
-                        url: data.url,
-                        title: result.title || data.title || 'Untitled',
-                        uploader: data.uploader || null,
-                        thumbnail: data.thumbnail || null,
-                        duration: data.duration || null,
-                        id: data.id || null,
-                        ts: Date.now()
-                    });
-                }
-            } catch (err) {
-                showToast('Failed to load next track', 'error');
-            } finally {
-                btnNext.disabled = originalDisabled;
-                updateNavButtons();
-            }
+            sendTransport('jump', { index });
         }
 
         function updateNavButtons() {
-            btnPrev.disabled = !(historyIndex > 0);
-            // Next is always available while a track is loaded: either we step
-            // forward through history, or (at the end) we fetch a fresh autoplay
-            // track seeded from the current one.
-            btnNext.disabled = playHistory.length === 0;
+            btnPrev.disabled = !(selectedDeviceIp && station.index > 0);
+            btnNext.disabled = !(selectedDeviceIp && station.tracks.length > 0);
         }
 
-        // Rebuild the "Recently played" list (newest first); highlight the active entry.
-        function renderHistory() {
+        // Rebuild the station list: what has played, what's on now, and what the
+        // server has lined up (with a badge for tracks still downloading).
+        function renderStation() {
             historyList.innerHTML = '';
-            if (!playHistory.length) {
+            if (!station.tracks.length) {
                 const empty = document.createElement('div');
                 empty.className = 'history-empty';
-                empty.textContent = 'No tracks played yet';
+                empty.textContent = 'No tracks queued yet';
                 historyList.appendChild(empty);
                 return;
             }
-            for (let i = playHistory.length - 1; i >= 0; i--) {
-                const entry = playHistory[i];
+            station.tracks.forEach((track, i) => {
                 const row = document.createElement('button');
                 row.type = 'button';
-                row.className = 'history-item' + (i === historyIndex ? ' active' : '');
+                row.className = 'history-item' + (i === station.index ? ' active' : '');
                 row.dataset.index = i;
 
-                if (entry.thumbnail) {
+                if (track.thumbnail) {
                     const img = document.createElement('img');
                     img.className = 'history-thumb';
-                    img.src = entry.thumbnail;
+                    img.src = track.thumbnail;
                     img.alt = '';
                     row.appendChild(img);
                 } else {
@@ -1841,31 +1742,44 @@
                 meta.className = 'history-meta';
                 const title = document.createElement('span');
                 title.className = 'history-track-title';
-                title.textContent = entry.title || 'Untitled';
+                title.textContent = track.title || 'Untitled';
                 const author = document.createElement('span');
                 author.className = 'history-track-author';
-                author.textContent = entry.uploader || 'YouTube';
+                const uploader = track.uploader || 'YouTube';
+                // 'failed' must read differently from 'queued': a failed track
+                // sits in a retry cooldown for minutes, so showing it as merely
+                // slow leaves the listener waiting for something that isn't coming.
+                const statusLabel = {
+                    done: '',
+                    running: ' · downloading…',
+                    failed: ' · unavailable',
+                }[track.cached];
+                author.textContent = uploader +
+                    (statusLabel === undefined ? ' · queued' : statusLabel);
                 meta.appendChild(title);
                 meta.appendChild(author);
                 row.appendChild(meta);
 
                 const icon = document.createElement('i');
-                icon.className = 'fa-solid fa-play history-play-icon';
+                icon.className = track.cached === 'running'
+                    ? 'fa-solid fa-arrow-down fa-fade history-play-icon'
+                    : (track.cached === 'failed'
+                        ? 'fa-solid fa-triangle-exclamation history-play-icon'
+                        : 'fa-solid fa-play history-play-icon');
                 icon.setAttribute('aria-hidden', 'true');
                 row.appendChild(icon);
 
                 historyList.appendChild(row);
-            }
+            });
         }
 
-        function clearHistory() {
-            if (!playHistory.length) return;
-            if (!confirm('Clear your playback history?')) return;
-            playHistory = [];
-            historyIndex = -1;
-            saveHistory();
-            renderHistory();
-            updateNavButtons();
+        // Stopping the speaker tears the station down server-side, which also
+        // stops it prefetching from YouTube.
+        async function clearHistory() {
+            if (!station.tracks.length) return;
+            if (!confirm('Stop playback and clear the queue?')) return;
+            await stopSonos();
+            await refreshStation();
         }
 
         function renderVideoInfo(info) {
@@ -1903,23 +1817,6 @@
             npTitle.textContent = title;
             nowplayingCard.classList.add('visible');
 
-            // Log autoplay advances to history. The server chains into YouTube's
-            // radio mix on its own (Sonos sees one static station), so the SSE
-            // feed is the only signal the client gets that the track changed.
-            // Guard on video id so the seed track — already recorded by
-            // playOnSonos — isn't logged twice when it arrives over SSE.
-            if (data.is_radio && data.video_id && playHistory[historyIndex]?.id !== data.video_id) {
-                recordPlay({
-                    url: `https://youtu.be/${data.video_id}`,
-                    title: (data.title && data.title.trim()) ? data.title : 'Untitled',
-                    uploader: data.artist || null,
-                    thumbnail: data.album_art || null,
-                    duration: null,
-                    id: data.video_id,
-                    ts: Date.now()
-                });
-            }
-
             // Toast once when a new track begins
             if (!paused && lastNpTitle !== null && title !== lastNpTitle) {
                 showToast(`Now playing: ${title}`);
@@ -1947,7 +1844,11 @@
             evtSource = new EventSource(`/api/events?device_ip=${encodeURIComponent(selectedDeviceIp)}`);
             evtSource.onmessage = (e) => {
                 try {
-                    renderNowPlaying(JSON.parse(e.data));
+                    const data = JSON.parse(e.data);
+                    // The station list rides along on the same connection, so the
+                    // queue and its download badges update without extra polling.
+                    if (data.station) applyStation(data.station);
+                    renderNowPlaying(data);
                 } catch (_) { /* ignore malformed frame */ }
             };
             // onerror: EventSource reconnects automatically; leave the card as-is meanwhile
@@ -1963,6 +1864,7 @@
             saveState();
             fetchVolume();
             connectEvents();
+            refreshStation();
             if (!speakerModal.hidden) closeSpeakerModal();
             if (toast) showToast(`Selected speaker: ${name}`);
         }
@@ -2108,14 +2010,17 @@
 
         // Send a track to the selected speaker via /api/play.
         // Shared by the Play button and history (prev/next/list) navigation.
-        async function castTrack(url, autoplay) {
+        // `mode` is 'auto' (queue next while something plays, otherwise start
+        // now), or 'now' / 'next' to force one of them.
+        async function castTrack(url, autoplay, mode) {
             const response = await fetch('/api/play', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     url: url,
                     device_ip: selectedDeviceIp,
-                    autoplay: autoplay
+                    autoplay: autoplay,
+                    mode: mode || 'auto'
                 })
             });
             const result = await response.json();
@@ -2123,6 +2028,20 @@
             if (result.error) {
                 showToast(result.error, 'error');
                 return null;
+            }
+
+            if (result.queued_next) {
+                // The speaker keeps playing what it had; the new track is
+                // downloading behind it, so leave Now Playing alone.
+                showToast(`Queued next on ${result.device}: ${result.title || 'track'}`);
+                return result;
+            }
+
+            if (result.started === false) {
+                // The server sent Play and the speaker still didn't start, so
+                // don't paint a Now Playing card that claims otherwise.
+                showToast(`${result.device} didn't start playing — try again`, 'error');
+                return result;
             }
 
             showToast(`Audio cast successfully to ${result.device}`);
@@ -2152,19 +2071,10 @@
             try {
                 const result = await castTrack(selectedVideoUrl, autoplayToggle.checked);
                 if (result) {
-                    const info = lastVideoInfo || {};
-                    recordPlay({
-                        url: selectedVideoUrl,
-                        title: result.title || info.title || 'Untitled',
-                        uploader: info.uploader || null,
-                        thumbnail: info.thumbnail || null,
-                        duration: info.duration || null,
-                        id: info.id || null,
-                        ts: Date.now()
-                    });
                     // Clear the search box now that the track is casting; the
                     // analysis preview stays put above it to show what's playing.
                     ytUrlInput.value = '';
+                    refreshStation();
                 }
             } catch (err) {
                 showToast('Failed to play stream on Sonos', 'error');
@@ -2318,7 +2228,7 @@
         historyList.addEventListener('click', (e) => {
             const row = e.target.closest('.history-item');
             if (!row) return;
-            castHistoryAt(parseInt(row.dataset.index, 10));
+            jumpToTrack(parseInt(row.dataset.index, 10));
         });
 
         // Speaker modal: open from the banner, close via button / backdrop / Escape
@@ -2341,11 +2251,10 @@
         document.addEventListener('DOMContentLoaded', () => {
             const saved = loadState();
 
-            // Restore browser-side playback history + prev/next cursor
-            loadHistory();
-            renderHistory();
+            // The playlist lives on the server now; drop the old browser-side log.
+            try { localStorage.removeItem(LEGACY_HISTORY_KEY); } catch (e) { /* non-fatal */ }
+            renderStation();
             updateNavButtons();
-            prefetchNextTrack();   // warm the next autoplay track from restored history
 
             // Restore the autoplay preference
             if (typeof saved.autoplay === 'boolean') {
@@ -2359,6 +2268,7 @@
                 setControlling(saved.deviceName || null);
                 fetchVolume();
                 connectEvents();
+                refreshStation();
             }
 
             // Restore the last analyzed video preview
