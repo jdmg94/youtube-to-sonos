@@ -9,7 +9,7 @@ __pycache__
 .db
 
 # podman
-quadlet/*.container
+quadlet/*
 
 # yt-dlp cookies (live session auth — never commit)
 cookies.txt

@@ -178,6 +178,9 @@ All configuration is via environment variables — set them in the Quadlet file
 | STATION_IDLE_POLLS | 150 | Idle polls before a stopped station shuts itself down.   |
 | MAX_TRACKS_PER_ARTIST | 2 | Cap on tracks one artist contributes per queue refill.  |
 | ARTIST_COOLDOWN | 4     | Recently-heard artists pushed to the back of a refill.    |
+| STATION_PICK_POOL | 3   | Top candidates the next track is drawn from at random.    |
+| RECENT_MAX    | 300      | Tracks remembered process-wide so they aren't re-served.  |
+| RECENT_TTL    | 43200    | Seconds a remembered track stays excluded (12h).          |
 | EVENT_POLL_INTERVAL | 2 | Seconds between now-playing polls for the SSE stream.     |
 
 ### The cache volume
@@ -353,7 +356,8 @@ curl -X POST http://$SERVER/api/play \
   -d '{"url":"https://youtu.be/dQw4w9WgXcQ","device_ip":"192.168.1.55"}'
 
 # Force one or the other with "mode": "now" (always restart) or "next"
-# (always queue behind the current track)
+# (always queue behind the current track) — this is what the UI's two
+# buttons send: "Play now" -> now, "Play next" -> next.
 curl -X POST http://$SERVER/api/play \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://youtu.be/dQw4w9WgXcQ","mode":"now"}'
@@ -365,6 +369,14 @@ curl -X POST http://$SERVER/api/transport \
 
 # The station: ordered track list, current index, per-track cache status
 curl "http://$SERVER/api/station?device_ip=192.168.1.55"
+
+# Refresh — throw away everything queued after the playing track and refill
+# it with songs this station (and the recent-tracks memory) haven't served.
+# The current track keeps playing; answers 409 if the speaker isn't playing
+# from its queue.
+curl -X POST http://$SERVER/api/station/refresh \
+  -H 'Content-Type: application/json' \
+  -d '{"device_ip":"192.168.1.55"}'
 
 # The download scheduler: what's running, what's queued, at what priority.
 # Priority is distance from what the speaker needs: -1 = a speaker is waiting

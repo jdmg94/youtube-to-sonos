@@ -12,6 +12,7 @@ import threading
 import subprocess
 import logging
 import heapq
+import random
 import itertools
 from collections import Counter
 from flask import Flask, jsonify, request, Response, render_template
@@ -286,8 +287,23 @@ def _yt_error_response(err, context):
 #                           queue refill, so no single artist dominates.
 #   ARTIST_COOLDOWN       — an artist just heard within this many tracks is
 #                           pushed to the back of the next refill.
+#   STATION_PICK_POOL     — how many of the top candidates the next track is
+#                           drawn from at random. 1 is the old behaviour, and it
+#                           is why replaying a song rebuilt the identical queue:
+#                           the mix is cached, the filters are deterministic, so
+#                           always taking the best candidate walks the same path
+#                           every time. A small pool keeps relevance (the
+#                           round-robin has already spread the artists) while
+#                           making two runs from one seed diverge.
+#   RECENT_MAX/RECENT_TTL — process-wide memory of tracks already served, so a
+#                           new station (or a refresh) doesn't re-suggest what
+#                           was just heard. Per-Station sets die with the
+#                           station; this is what outlives it.
 MAX_TRACKS_PER_ARTIST = int(os.environ.get('MAX_TRACKS_PER_ARTIST', 2))
 ARTIST_COOLDOWN = int(os.environ.get('ARTIST_COOLDOWN', 4))
+STATION_PICK_POOL = max(1, int(os.environ.get('STATION_PICK_POOL', 3)))
+RECENT_MAX = int(os.environ.get('RECENT_MAX', 300))
+RECENT_TTL = float(os.environ.get('RECENT_TTL', 12 * 3600))
 
 # --- Local audio cache -------------------------------------------------------
 # Songs are downloaded and transcoded to disk ahead of playback, and Sonos pulls
@@ -352,12 +368,13 @@ PLAY_START_TIMEOUT = float(os.environ.get('PLAY_START_TIMEOUT', 45))
 PLAY_CONFIRM_TIMEOUT = float(os.environ.get('PLAY_CONFIRM_TIMEOUT', 6))
 PLAY_NUDGE_AFTER = float(os.environ.get('PLAY_NUDGE_AFTER', 1.5))
 
-# Guards STATION, _DOWNLOADS, _INUSE and _MIX_CACHE. Reentrant because the
-# station loop holds it while calling helpers that take it again.
+# Guards STATION, _DOWNLOADS, _INUSE, _MIX_CACHE and _RECENT. Reentrant because
+# the station loop holds it while calling helpers that take it again.
 _STATE_LOCK = threading.RLock()
 _DOWNLOADS = {}          # video_id -> Download
 _INUSE = Counter()       # video_id -> active /media readers; blocks eviction
 _MIX_CACHE = {}          # video_id -> (fetched_at, entries)
+_RECENT = {}             # video_id -> (served_at, title_key)
 
 # YouTube ids are 11 chars of [A-Za-z0-9_-], but keep the check loose and just
 # reject anything that could escape CACHE_DIR.
@@ -442,16 +459,21 @@ def extract_audio(video_id):
     logger.info(f"Resolved {video_id}: {desc} cookies={'yes' if COOKIES_FILE else 'NO'}")
     return direct_url, meta, headers
 
-def get_radio_mix(video_id, limit=25):
+def get_radio_mix(video_id, limit=25, refresh=False):
     """Ordered list of track entries from YouTube's autoplay radio mix (RD<id>).
 
     This is YouTube's own 'up next' / autoplay sequence for a seed video. Each
     entry is a dict with at least 'id', plus 'title'/'channel_id'/'uploader'
     used downstream to keep the station varied (see build_station_queue).
+
+    `refresh` skips the memo and re-asks YouTube. The cache is what makes a
+    track boundary cheap, but it also means a seed hands back the byte-identical
+    mix for MIX_CACHE_TTL — so the one caller who explicitly wants a different
+    set of songs (`refresh_station`) has to be able to bypass it.
     """
     with _STATE_LOCK:
         cached = _MIX_CACHE.get(video_id)
-        if cached and time.time() - cached[0] < MIX_CACHE_TTL:
+        if not refresh and cached and time.time() - cached[0] < MIX_CACHE_TTL:
             return cached[1]
 
     mix_url = f"https://www.youtube.com/watch?v={video_id}&list=RD{video_id}"
@@ -494,21 +516,63 @@ def _title_key(title):
     t = re.sub(r'\s+', ' ', t).strip()
     return t
 
+def _remember(video_id, title):
+    """Record a track as recently served, process-wide.
+
+    `Station.played_ids` dies with its station, so without this a stop-and-play
+    on the same seed rebuilds the identical queue: the radio mix is still cached
+    and nothing remembers that those tracks just played. Entries expire after
+    RECENT_TTL and the map is capped at RECENT_MAX, oldest first, so a station
+    left running for days can't starve itself of candidates.
+    """
+    if not video_id:
+        return
+    with _STATE_LOCK:
+        _RECENT[video_id] = (time.time(), _title_key(title))
+        if len(_RECENT) > RECENT_MAX:
+            cutoff = time.time() - RECENT_TTL
+            for vid, (served, _t) in list(_RECENT.items()):
+                if served < cutoff:
+                    del _RECENT[vid]
+            for vid in sorted(_RECENT, key=lambda v: _RECENT[v][0])[
+                    :max(0, len(_RECENT) - RECENT_MAX)]:
+                del _RECENT[vid]
+
+
+def _recent_filters():
+    """(ids, title_keys) of tracks served recently enough to skip. Prunes as it reads."""
+    cutoff = time.time() - RECENT_TTL
+    ids, titles = set(), set()
+    with _STATE_LOCK:
+        for vid, (served, tkey) in list(_RECENT.items()):
+            if served < cutoff:
+                del _RECENT[vid]
+                continue
+            ids.add(vid)
+            if tkey:
+                titles.add(tkey)
+    return ids, titles
+
+
 def _reseed_ids(played_order):
     """Pick which recently-played tracks to reseed the autoplay mix from.
 
-    Uses the most recent track plus one from a few steps back, so the candidate
-    pool blends 'related to what's playing now' with a slightly different point
-    in the walk — this is the main lever against orbiting one artist."""
+    Uses the most recent track plus one drawn at random from a little further
+    back, so the candidate pool blends 'related to what's playing now' with a
+    different point in the walk — this is the main lever against orbiting one
+    artist. The second seed is random rather than a fixed offset because a fixed
+    one makes the whole walk reproducible: same seed, same mix, same queue."""
     if not played_order:
         return []
     seeds = [played_order[-1]]
-    if len(played_order) >= 4:
-        seeds.append(played_order[-4])
+    window = played_order[-9:-1]
+    if window:
+        seeds.append(random.choice(window))
     return seeds
 
 def build_station_queue(seeds, played_ids, played_titles,
-                        cooldown_artists=(), max_per_artist=MAX_TRACKS_PER_ARTIST):
+                        cooldown_artists=(), max_per_artist=MAX_TRACKS_PER_ARTIST,
+                        refresh=False):
     """Build a varied autoplay queue from one or more seed radio mixes.
 
     Drops already-played tracks and re-uploads of already-played songs, caps how
@@ -524,7 +588,7 @@ def build_station_queue(seeds, played_ids, played_titles,
     seen_ids = set()
     seen_titles = set()
     for seed in seeds:
-        for e in get_radio_mix(seed):
+        for e in get_radio_mix(seed, refresh=refresh):
             vid = e.get('id')
             if not vid or vid in played_ids or vid in seen_ids:
                 continue
@@ -1308,24 +1372,48 @@ class Station:
         tkey = _title_key(meta['title'])
         if tkey:
             self.played_titles.add(tkey)
+        # Every track that ever enters a station passes through here, which
+        # makes this the one place the process-wide memory can be kept honest.
+        _remember(vid, meta['title'])
         self.artist_history.append(_artist_key(entry) or vid)
         return meta
 
 
-def _pick_next(station):
-    """Next track for the station, using the same variety rules as before."""
+def _pick_next(station, refresh=False):
+    """Next track for the station, excluding anything heard recently.
+
+    Filters are applied as a ladder, loosest constraint dropped first, so a full
+    recent-memory can slow the station down but never stall it:
+
+      1. the station's own played sets *plus* the process-wide recent memory;
+      2. the station's sets alone (this station has still never repeated);
+      3. ids only, artist cap lifted — the last resort before 'exhausted'.
+
+    The result is drawn at random from the top STATION_PICK_POOL candidates
+    rather than always taking the best one: build_station_queue is deterministic,
+    so `queue[0]` walks an identical path every time a seed comes back around.
+    """
     seeds = _reseed_ids(station.played_order)
     if not seeds:
         return None
     cooldown = station.artist_history[-ARTIST_COOLDOWN:]
-    queue = build_station_queue(seeds, station.played_ids, station.played_titles,
-                                cooldown_artists=cooldown)
+    recent_ids, recent_titles = _recent_filters()
+    queue = build_station_queue(seeds,
+                                station.played_ids | recent_ids,
+                                station.played_titles | recent_titles,
+                                cooldown_artists=cooldown, refresh=refresh)
+    if not queue:
+        queue = build_station_queue(seeds, station.played_ids,
+                                    station.played_titles,
+                                    cooldown_artists=cooldown)
     if not queue:
         # Nothing new under the artist cap — relax the cap and the title filter
         # one last time before declaring the station exhausted.
         queue = build_station_queue(seeds, station.played_ids, set(),
                                     cooldown_artists=cooldown, max_per_artist=99)
-    return queue[0] if queue else None
+    if not queue:
+        return None
+    return random.choice(queue[:STATION_PICK_POOL])
 
 
 def _prefetch_target(station):
@@ -1374,18 +1462,23 @@ def _reprioritize(station):
         _SCHED.reprioritize(meta['video_id'], _track_priority(station, i))
 
 
-def _top_up(station):
+def _top_up(station, refresh=False):
     """Keep tracks resolved and downloading ahead of the cursor.
 
     Capped at TOPUP_BATCH per tick, and ramped by `_prefetch_target`, so a cold
     start doesn't resolve and submit the whole WINDOW_AHEAD in one burst while
     the seed is still trying to stream.
+
+    `refresh` re-asks YouTube for the seed mixes on the *first* pick only — one
+    refetch is enough to replace the memoised mix that every later pick then
+    reads, and asking again per pick would just spend round trips on data we
+    already refreshed a moment ago.
     """
     target = _prefetch_target(station)
     added = 0
     while (len(station.tracks) - station.index - 1 < target
            and added < TOPUP_BATCH):
-        entry = _pick_next(station)
+        entry = _pick_next(station, refresh=refresh and added == 0)
         if not entry:
             if not station.exhausted:
                 logger.info(f"Autoplay mix exhausted for {station.device_ip}; "
@@ -1511,7 +1604,11 @@ def _station_loop(device_ip, generation):
             else:
                 station.idle_polls = 0
                 if station.playing_seen:
-                    _top_up(station)
+                    # Under the station lock like the other writer of `tracks`:
+                    # a refresh truncating the list mid-append would leave it
+                    # holding tracks the speaker's queue no longer has.
+                    with station.lock:
+                        _top_up(station)
                 _flush_queue(station, coordinator)
                 _evict(station)
         except Exception as e:
@@ -1568,6 +1665,94 @@ def end_station(device_ip):
                 download = _DOWNLOADS.get(vid)
                 if download is not None and download.state == 'queued':
                     download.cancel()
+
+
+def refresh_station(coordinator, station):
+    """Drop everything queued after the playing track and refill it anew.
+
+    Returns how many tracks were discarded, or None when the speaker isn't
+    playing from its queue (line-in, TV, a radio stream) and there is therefore
+    no tail to replace.
+
+    The playing track is deliberately left alone: a refresh is 'the rest of this
+    is stale', not 'stop what you're doing'. That is also what makes trimming
+    the Sonos queue safe here, despite the standing rule that it is never
+    trimmed mid-session — removing items renumbers `playlist_position`, but only
+    for items *after* the removal point, and everything removed here is already
+    past the cursor. Items go furthest-first so each removal can't renumber the
+    ones still to be removed.
+
+    A removal the speaker rejects stops the truncation right there rather than
+    letting `tracks` shrink past what the queue actually holds: an off-by-one
+    between the two lists misaligns every position calculation for the rest of
+    the session.
+
+    `played_ids` / `played_titles` / `_RECENT` are all left intact, which is
+    precisely why the refill is new — the discarded tracks stay excluded.
+    """
+    with station.lock:
+        position = _queue_position(coordinator)
+        if position <= 0 or not station.tracks:
+            return None
+        cursor = min(position - 1, len(station.tracks) - 1)
+        if cursor >= station.enqueued:
+            # The speaker is past what we ever enqueued: our list and its queue
+            # have drifted, and trimming on that assumption would leave items on
+            # the queue that `tracks` no longer knows about.
+            logger.warning(f"Station on {station.device_ip} is behind the "
+                           f"speaker (cursor {cursor}, {station.enqueued} "
+                           f"enqueued); not refreshing")
+            return None
+        station.index = cursor
+
+        keep = cursor + 1
+        for i in range(station.enqueued - 1, cursor, -1):
+            try:
+                coordinator.remove_from_queue(i)
+            except Exception as e:
+                logger.warning(f"Could not remove queue item {i} on "
+                               f"{station.device_ip}: {e}; keeping the rest")
+                keep = i + 1
+                break
+
+        dropped = station.tracks[keep:]
+        del station.tracks[keep:]
+        station.enqueued = min(station.enqueued, keep)
+        station.exhausted = False
+
+        # Re-order `played_order` so its tail is what actually survived. It is
+        # only read by `_reseed_ids`, and its last entry is the primary seed —
+        # left alone, the refill would be built out of the radio mix of a track
+        # the listener has just thrown away. Discarded ids stay in the list (and
+        # in `played_ids`) so they remain excluded.
+        survivors = [m['video_id'] for m in station.tracks]
+        surviving = set(survivors)
+        station.played_order = [v for v in station.played_order
+                                if v not in surviving] + survivors
+
+        # Cancel the discarded tracks' pending downloads, with end_station's
+        # guards: never touch one another station still lists or a /media reader
+        # is on, and cancel (penalty-free) rather than fail them.
+        with _STATE_LOCK:
+            wanted = {m['video_id'] for other in STATION.values()
+                      for m in other.tracks}
+            for meta in dropped:
+                vid = meta['video_id']
+                if vid in wanted or _INUSE.get(vid):
+                    continue
+                if _SCHED.cancel(vid):
+                    download = _DOWNLOADS.get(vid)
+                    if download is not None and download.state == 'queued':
+                        download.cancel()
+
+        logger.info(f"Refreshing station on {station.device_ip}: dropped "
+                    f"{len(dropped)} track(s) after position {cursor + 1}")
+        # refresh=True so the seeds' memoised radio mixes are re-fetched: a
+        # brand-new set of songs can't come out of the same cached mix.
+        _top_up(station, refresh=True)
+
+    _flush_queue(station, coordinator)
+    return len(dropped)
 
 
 PLAYING_STATES = ('PLAYING', 'TRANSITIONING')
@@ -1798,16 +1983,19 @@ def _resolve_seed_meta(url):
 def play():
     """Play the seed now, or queue it next if the speaker is already playing.
 
-    Playing now clears the speaker's queue and starts a station: the seed is
-    enqueued immediately and served while it downloads, so playback starts
-    without waiting for the whole file, and the station loop then fills the
-    queue ahead of the cursor with already-downloaded tracks.
+    Playing now starts the seed download and waits for its first bytes before
+    clearing the speaker's queue, so whatever was playing covers the resolve +
+    transcode startup instead of the speaker falling silent for it. The seed is
+    then served while the rest of it downloads, so playback starts without
+    waiting for the whole file, and the station loop fills the queue ahead of
+    the cursor with already-downloaded tracks.
 
-    While something is playing, interrupting it is the wrong answer — the seed
-    is inserted directly after the current track and downloaded in the
-    background, so it plays the moment that track ends. `mode` overrides the
-    choice: 'now' always restarts, 'next' always queues (falling back to 'now'
-    when the speaker has nothing to queue behind).
+    Queueing next instead inserts the seed directly after the current track and
+    downloads it in the background, so it plays the moment that track ends and
+    nothing is interrupted. `mode` picks: 'now' always restarts, 'next' always
+    queues (falling back to 'now' when the speaker has nothing to queue behind),
+    and 'auto' — the default for API callers; the UI always sends one of the
+    other two — queues next whenever the speaker is already playing.
     """
     data = request.get_json() or {}
     url = data.get('url')
@@ -1870,7 +2058,16 @@ def play():
         # 0 means the prefetch gate holds every other download off the wire
         # until this one finishes, so the seed gets the whole uplink.
         download = ensure_cached(video_id, priority=0)
+        # Wait for the first bytes *before* touching the speaker. Playing now is
+        # an explicit user action ("Play now") taken while something else is
+        # playing, so the queue is left intact and the old track keeps playing
+        # through the resolve + transcode startup: the wait costs a spinner
+        # rather than a silent speaker between the two songs.
+        _wait_for_first_bytes(download)
 
+        # Only now replace what the speaker is doing: with the first bytes
+        # already on disk, its GET of /media is answered immediately instead of
+        # hanging on a download that hasn't produced anything yet.
         coordinator.clear_queue()
         try:
             coordinator.play_mode = 'NORMAL'
@@ -1880,10 +2077,6 @@ def play():
         station = start_station(device_ip, seed)
         enqueue(coordinator, station.tracks[0])
         station.enqueued = 1
-        # Only now tell the speaker to play: with the first bytes already on
-        # disk, its GET of /media is answered immediately instead of hanging on
-        # a download that hasn't produced anything yet.
-        _wait_for_first_bytes(download)
         coordinator.play_from_queue(0)
         started = _ensure_playing(coordinator)
 
@@ -1975,6 +2168,41 @@ def station_view():
     payload = station_payload(station)
     payload['device_ip'] = device_ip
     return jsonify(payload)
+
+@app.route('/api/station/refresh', methods=['POST'])
+def station_refresh():
+    """Replace everything queued after the playing track with a fresh set.
+
+    The listener's escape hatch from a station that keeps circling the same
+    songs: the current track plays on untouched, its tail is discarded, and the
+    refill excludes everything this station and the process-wide recent memory
+    have already served.
+    """
+    data = request.get_json() or {}
+    device_ip = data.get('device_ip')
+
+    try:
+        speaker = _resolve_speaker(device_ip)
+        if speaker is None:
+            return jsonify({"error": "No Sonos devices discovered"}), 404
+        device_ip = speaker.ip_address
+        with _STATE_LOCK:
+            station = STATION.get(device_ip)
+        if station is None:
+            return jsonify({"error": "No station is running on this speaker"}), 404
+
+        dropped = refresh_station(_coordinator(speaker), station)
+        if dropped is None:
+            return jsonify({
+                "error": "This speaker isn't playing from its queue"}), 409
+
+        payload = station_payload(station)
+        payload.update({"status": "refreshed", "dropped": dropped,
+                        "device_ip": device_ip, "device": speaker.player_name})
+        return jsonify(payload)
+    except Exception as e:
+        return _yt_error_response(e, "queue refresh")
+
 
 @app.route('/api/downloads', methods=['GET'])
 def downloads_view():

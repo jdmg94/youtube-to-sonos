@@ -648,6 +648,23 @@
             box-shadow: 0 6px 20px rgba(212, 175, 55, 0.4);
         }
 
+        /* Secondary to .btn-play: queue the track behind what's playing. */
+        .btn-play-next {
+            flex-grow: 1;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            box-shadow: none;
+        }
+        .btn-play-next:hover {
+            background: rgba(255, 255, 255, 0.15);
+            box-shadow: none;
+        }
+
+        .controls-row .action-btn {
+            justify-content: center;
+        }
+
         .btn-stop {
             flex-grow: 1;
             background: rgba(255, 255, 255, 0.08);
@@ -1044,6 +1061,29 @@
             color: var(--accent-primary);
         }
 
+        .history-clear:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+        .history-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        /* Refresh sits next to Stop but isn't destructive to what's playing,
+           so it hovers gold rather than red. */
+        .history-refresh:hover:not(:disabled) {
+            background: rgba(212, 175, 55, 0.12);
+            border-color: rgba(212, 175, 55, 0.35);
+            color: var(--accent-secondary);
+        }
+
+        .history-refresh.spinning i {
+            animation: spin 1s linear infinite;
+        }
+
         .history-list {
             display: flex;
             flex-direction: column;
@@ -1436,7 +1476,13 @@
                 <span class="history-title-label">
                     <i class="fa-solid fa-list-ul" aria-hidden="true"></i> Queue
                 </span>
-                <button class="history-clear" id="btn-clear-history">Stop</button>
+                <div class="history-actions">
+                    <button class="history-clear history-refresh" id="btn-refresh-station"
+                            title="Discard what's queued ahead and fetch a fresh set of songs">
+                        <i class="fa-solid fa-rotate" aria-hidden="true"></i> Refresh
+                    </button>
+                    <button class="history-clear" id="btn-clear-history">Stop</button>
+                </div>
             </div>
             <div class="history-list" id="history-list"></div>
         </section>
@@ -1474,8 +1520,11 @@
                     </div>
                 </div>
                 <div class="controls-row">
-                    <button class="action-btn btn-play" id="btn-play-sonos" style="flex-grow: 1;">
-                        <i class="fa-solid fa-wifi" aria-hidden="true"></i> Play on Sonos
+                    <button class="action-btn btn-play" id="btn-play-sonos">
+                        <i class="fa-solid fa-play" aria-hidden="true"></i> Play now
+                    </button>
+                    <button class="action-btn btn-play-next" id="btn-play-next">
+                        <i class="fa-solid fa-plus" aria-hidden="true"></i> Play next
                     </button>
                 </div>
             </div>
@@ -1540,6 +1589,9 @@
         // drives the speaker's own queue. This is a read-only mirror of
         // /api/station, refreshed over SSE.
         let station = { index: 0, tracks: [], exhausted: false };
+        // True while /api/station/refresh is in flight, so an SSE tick landing
+        // mid-request can't re-enable the button under the spinner.
+        let renewInFlight = false;
 
         // Dom Elements
         const statusDot = document.getElementById('status-dot');
@@ -1565,11 +1617,13 @@
         const videoDuration = document.getElementById('video-duration');
 
         const btnPlaySonos = document.getElementById('btn-play-sonos');
+        const btnPlayNext = document.getElementById('btn-play-next');
         const btnStopSonos = document.getElementById('btn-stop-sonos');
         const btnPrev = document.getElementById('btn-prev');
         const btnNext = document.getElementById('btn-next');
         const historyList = document.getElementById('history-list');
         const btnClearHistory = document.getElementById('btn-clear-history');
+        const btnRefreshStation = document.getElementById('btn-refresh-station');
 
         const toast = document.getElementById('toast-notification');
         const toastIcon = document.getElementById('toast-icon');
@@ -1706,6 +1760,10 @@
         function updateNavButtons() {
             btnPrev.disabled = !(selectedDeviceIp && station.index > 0);
             btnNext.disabled = !(selectedDeviceIp && station.tracks.length > 0);
+            // Refresh replaces what's *after* the current track, so it needs a
+            // station with something queued ahead to be worth offering.
+            btnRefreshStation.disabled = renewInFlight || !(selectedDeviceIp &&
+                station.tracks.length > station.index + 1);
         }
 
         // Rebuild the station list: what has played, what's on now, and what the
@@ -1771,6 +1829,42 @@
 
                 historyList.appendChild(row);
             });
+        }
+
+        // Throw away what's queued ahead and pull a brand-new set of songs,
+        // leaving the current track playing. The server answers with the new
+        // station list, so the UI updates without waiting for the SSE tick.
+        async function renewQueue() {
+            if (!selectedDeviceIp) {
+                showToast('Select a speaker first', 'error');
+                return;
+            }
+            renewInFlight = true;
+            btnRefreshStation.disabled = true;
+            btnRefreshStation.classList.add('spinning');
+            try {
+                const response = await fetch('/api/station/refresh', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ device_ip: selectedDeviceIp })
+                });
+                const result = await response.json();
+                if (result.error) {
+                    showToast(result.error, 'error');
+                    return;
+                }
+                applyStation(result);
+                // The server refills a couple of tracks synchronously and the
+                // station loop tops the rest up, so report what was replaced
+                // rather than what is queued at this instant.
+                showToast(`Queue refreshed — ${result.dropped} track(s) replaced`);
+            } catch (err) {
+                showToast('Failed to refresh the queue', 'error');
+            } finally {
+                renewInFlight = false;
+                btnRefreshStation.classList.remove('spinning');
+                updateNavButtons();
+            }
         }
 
         // Stopping the speaker tears the station down server-side, which also
@@ -2009,9 +2103,9 @@
         }
 
         // Send a track to the selected speaker via /api/play.
-        // Shared by the Play button and history (prev/next/list) navigation.
-        // `mode` is 'auto' (queue next while something plays, otherwise start
-        // now), or 'now' / 'next' to force one of them.
+        // `mode` is 'now' (clear the queue and build a fresh station around this
+        // song) or 'next' (insert it after the current track). The UI always
+        // picks one explicitly — the API's 'auto' default is for other callers.
         async function castTrack(url, autoplay, mode) {
             const response = await fetch('/api/play', {
                 method: 'POST',
@@ -2052,8 +2146,11 @@
             return result;
         }
 
-        // Play stream on Sonos (fresh play from the Play button — records to history)
-        async function playOnSonos() {
+        // Cast the analyzed track from one of the two Play buttons. Both are
+        // disabled for the duration: "Play now" tears the station down and
+        // rebuilds it, so a "Play next" landing mid-flight would insert into a
+        // queue that is about to be cleared.
+        async function castFromButton(button, mode, spinnerLabel) {
             if (!selectedVideoUrl) {
                 showToast('No video analyzed', 'error');
                 return;
@@ -2064,12 +2161,13 @@
                 return;
             }
 
-            const originalLabel = btnPlaySonos.innerHTML;
-            btnPlaySonos.disabled = true;
-            btnPlaySonos.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> Casting…';
+            const buttons = [btnPlaySonos, btnPlayNext];
+            const originalLabel = button.innerHTML;
+            buttons.forEach(b => { b.disabled = true; });
+            button.innerHTML = `<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> ${spinnerLabel}`;
 
             try {
-                const result = await castTrack(selectedVideoUrl, autoplayToggle.checked);
+                const result = await castTrack(selectedVideoUrl, autoplayToggle.checked, mode);
                 if (result) {
                     // Clear the search box now that the track is casting; the
                     // analysis preview stays put above it to show what's playing.
@@ -2079,8 +2177,8 @@
             } catch (err) {
                 showToast('Failed to play stream on Sonos', 'error');
             } finally {
-                btnPlaySonos.disabled = false;
-                btnPlaySonos.innerHTML = originalLabel;
+                buttons.forEach(b => { b.disabled = false; });
+                button.innerHTML = originalLabel;
             }
         }
 
@@ -2220,11 +2318,13 @@
         // Listeners
         refreshBtn.addEventListener('click', fetchDevices);
         btnAnalyze.addEventListener('click', analyzeVideo);
-        btnPlaySonos.addEventListener('click', playOnSonos);
+        btnPlaySonos.addEventListener('click', () => castFromButton(btnPlaySonos, 'now', 'Casting…'));
+        btnPlayNext.addEventListener('click', () => castFromButton(btnPlayNext, 'next', 'Queueing…'));
         btnStopSonos.addEventListener('click', stopSonos);
         btnPrev.addEventListener('click', playPrev);
         btnNext.addEventListener('click', playNext);
         btnClearHistory.addEventListener('click', clearHistory);
+        btnRefreshStation.addEventListener('click', renewQueue);
         historyList.addEventListener('click', (e) => {
             const row = e.target.closest('.history-item');
             if (!row) return;
