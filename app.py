@@ -382,6 +382,15 @@ def play():
             logger.info(f"Connecting to Sonos device at IP: {device_ip}")
             speaker = soco.SoCo(device_ip)
 
+        # AVTransport commands (play_uri, stop, etc.) only succeed on the group
+        # coordinator — calling them on a grouped/bonded follower raises UPnP
+        # error 701 "Transition not available". Always redirect to the coordinator.
+        if not speaker.is_coordinator:
+            logger.info(f"'{speaker.player_name}' is a group follower; redirecting to coordinator "
+                        f"'{speaker.group.coordinator.player_name}'")
+            speaker = speaker.group.coordinator
+            device_ip = speaker.ip_address
+
         # 3. Construct the stream URL pointing back to this Flask server.
         # The autoplay flag tells the stream endpoint whether to chain into the
         # YouTube autoplay mix after the seed video, or stop after one track.
@@ -420,7 +429,10 @@ def stop():
             speaker = devices[0]
         else:
             speaker = soco.SoCo(device_ip)
-            
+
+        if not speaker.is_coordinator:
+            speaker = speaker.group.coordinator
+
         logger.info(f"Stopping playback on speaker '{speaker.player_name}' ({speaker.ip_address})")
         speaker.stop()
         return jsonify({"status": "stopped", "device": speaker.player_name})
