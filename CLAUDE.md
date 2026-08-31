@@ -17,13 +17,13 @@ The browser talks only to Next; the *speakers* talk only to Flask, fetching `/me
 
 ```bash
 # Deployment — both containers, via docker-compose.yml
-make up             # build + start API and UI; UI on :3000, API on :5000
+make up             # build + start API and UI; UI on :8080, API on :5000
 make down / logs / ps / restart
 make docker-update-ytdlp  # rebuild busting the yt-dlp layer (see below)
 
 # Backend alone
 make run-local      # local dev: uv venv + install deps + run app.py
-make build / run    # standalone Podman image, --network=host
+make build / run    # standalone Docker image, --network=host
 make update-ytdlp   # rebuild only the yt-dlp layer (fixes YouTube extractor breakage / 403s)
 
 # Frontend (in web/ — pnpm, not npm)
@@ -38,15 +38,17 @@ The backend still has no tests or linters. The frontend has all four gates above
 
 Notes on ports:
 
-* `app.py` defaults to `PORT=8080` when run directly; the Makefile and Containerfile set `PORT=5000`.
+* `app.py` defaults to `PORT=5000` when run directly, matching what the Makefile and Containerfile set. It used to default to 8080, which is now the UI's port — a bare `python app.py` would have collided with the UI container.
 * `next.config.ts` defaults `API_ORIGIN` to `http://127.0.0.1:5000` to match the container.
 * **On macOS, `:5000` is taken by ControlCenter (AirPlay Receiver)**, which answers every path with a bare `403 Forbidden` (`Server: AirTunes/…`). The proxy forwards to it happily and the UI shows "Scan error: 403 Forbidden", which looks like a broken backend rather than a port collision. Run the backend on `PORT=5001` and set `API_ORIGIN` to match in `web/.env.local`.
 
 ## Deployment
 
-`docker-compose.yml` runs both images. `PORT` (default 5000) and `WEB_PORT` (default 3000) move them; `PORT` is interpolated into *both* the backend's env and the UI's `API_ORIGIN` build arg, so the two cannot drift.
+`docker-compose.yml` runs both images. `PORT` (default 5000) and `WEB_PORT` (default 8080 — not Next's own 3000, which is the port most likely to be already claimed on a shared server) move them; `PORT` is interpolated into *both* the backend's env and the UI's `API_ORIGIN` build arg, so the two cannot drift.
 
 **`API_ORIGIN` is a build arg, not a runtime env var, and this is the single easiest thing to get wrong here.** Next evaluates `rewrites()` during `next build` and writes the resolved destination into `.next/routes-manifest.json`, so the backend address is compiled into the image. Setting `API_ORIGIN` on the *running container* does nothing at all — and does it silently: the UI boots, renders, and every `/api` call fails against whatever address was baked. Changing it means `docker compose up -d --build`, because Compose does not rebuild on `up` when only a build arg changed.
+
+It is written `${API_ORIGIN:-http://127.0.0.1:${PORT:-5000}}`: the default derives from `PORT` so the pair cannot drift, and an explicit `API_ORIGIN` opts out of that derivation entirely — which is only correct when the target is a backend *outside* this compose file. Setting it to reach the `youtube-sonos` service just breaks the `PORT` coupling for nothing.
 
 The same mechanism is why `web/.dockerignore` excludes `.env*`. A developer's `.env.local` holding the macOS `:5001` workaround, left in the build context, ships an image that talks to a port existing only on that laptop.
 

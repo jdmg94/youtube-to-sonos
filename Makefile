@@ -8,8 +8,10 @@ IMAGE_NAME = youtube-sonos-streamer
 # The API's port. Also interpolated into the UI's API_ORIGIN build arg by
 # docker-compose.yml, so the two cannot drift.
 PORT ?= 5000
-# The UI's port — the one to open in a browser.
-WEB_PORT ?= 3000
+# The UI's port — the one to open in a browser. Not Next's own default 3000:
+# that port is the first thing anything else on a shared box claims, and the UI
+# losing the bind is a failure that only shows up as a dead browser tab.
+WEB_PORT ?= 8080
 
 
 # --- compose (the deployment) ------------------------------------------------
@@ -51,20 +53,20 @@ rebuild:
 docker-update-ytdlp:
 	UPDATE_DATE=$$(date +%s) docker compose up -d --build
 
-# Same, for the standalone podman image below.
+# Same, for the standalone image below.
 update-ytdlp:
-	podman build --build-arg UPDATE_DATE=$$(date +%s) -t $(IMAGE_NAME) .
+	docker build --build-arg UPDATE_DATE=$$(date +%s) -t $(IMAGE_NAME) .
 
 
 # --- API alone (no UI) -------------------------------------------------------
 
 build:
-	podman build -t $(IMAGE_NAME) .
+	docker build -t $(IMAGE_NAME) .
 
 run:
 	mkdir -p cache
 	@test -f cookies.txt || { echo "cookies.txt missing — create it, or drop the -v below and add -e COOKIES_FILE="; exit 1; }
-	podman run -it --rm --network=host -e PORT=$(PORT) \
+	docker run -it --rm --network=host -e PORT=$(PORT) \
 		-v ./cookies.txt:/app/cookies.txt:ro,z \
 		-v ./cache:/app/cache:z $(IMAGE_NAME)
 

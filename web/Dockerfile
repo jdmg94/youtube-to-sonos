@@ -52,7 +52,10 @@ RUN pnpm build
 FROM base AS runner
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
-ENV PORT=3000
+# Matches docker-compose.yml's WEB_PORT default, so `docker run` on this image
+# alone lands where the compose deployment does. 3000 is avoided deliberately:
+# it is every Node dev server's default and the likeliest port to be taken.
+ENV PORT=8080
 # Bind all interfaces. The standalone server defaults to localhost, which under
 # bridge networking answers only inside the container and looks like a dead port
 # from outside.
@@ -69,7 +72,7 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 USER nextjs
-EXPOSE 3000
+EXPOSE 8080
 
 # No curl in this image, and adding it just to poll a port is a package and a
 # CVE surface for something node already does. Checks the app itself, not the

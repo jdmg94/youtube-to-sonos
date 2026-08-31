@@ -2,7 +2,7 @@
 # or `podman compose`).
 #
 # Two services: `youtube-sonos` is the Flask JSON API and media server, `web`
-# is the Next.js UI. Open the UI on :3000; :5000 is for the speakers and for
+# is the Next.js UI. Open the UI on :8080; :5000 is for the speakers and for
 # curl. Nothing but `web` should be reachable from a browser.
 #
 # Host networking is REQUIRED, for a different reason in each service.
@@ -84,14 +84,22 @@ services:
         # the running container has no effect whatsoever — and fails silently,
         # because the UI boots normally and only the /api calls 404.
         #
-        # Interpolating PORT keeps it pinned to whatever the backend above is
-        # actually listening on. Compose does not rebuild on `up` when a build
-        # arg changes, so changing PORT needs `up -d --build`.
-        API_ORIGIN: http://127.0.0.1:${PORT:-5000}
+        # The default interpolates PORT, so it stays pinned to whatever the
+        # backend above is actually listening on and the two cannot drift.
+        # Overriding API_ORIGIN explicitly opts out of that coupling — it is
+        # for pointing the UI at a backend that is NOT the `youtube-sonos`
+        # service in this file (a host-installed one, or another box). If you
+        # override it, PORT no longer has any say in where /api goes.
+        #
+        # Compose does not rebuild on `up` when only a build arg changed, so
+        # changing either variable needs `up -d --build`.
+        API_ORIGIN: ${API_ORIGIN:-http://127.0.0.1:${PORT:-5000}}
     network_mode: host
     environment:
-      # The UI's own port — this is the one to open in a browser.
-      PORT: ${WEB_PORT:-3000}
+      # The UI's own port — this is the one to open in a browser. Not 3000:
+      # that is Next's own default and the first port anything else on a shared
+      # box takes, so the UI would lose the race and fail to bind.
+      PORT: ${WEB_PORT:-8080}
     # Ordering only, not a guarantee: the UI is a client of the API like any
     # other and renders its own error states when it is down. Waiting for
     # healthy just avoids handing someone a "Scan error" banner during the

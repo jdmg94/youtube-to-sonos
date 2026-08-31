@@ -1,9 +1,9 @@
 # YouTube → Sonos Streamer
 
 Stream any YouTube video's audio to a Sonos speaker on your LAN.
-Runs as two containers via **Docker Compose**, designed for a Fedora server
-(Podman works too — the compose file is portable and the Makefile keeps
-podman targets for the API alone).
+Runs as two containers via **Docker Compose**, designed for a Fedora server.
+The compose file is portable, so `podman compose` works too, but the Makefile
+shells out to `docker` — swap the binary if you run Podman.
 
 ---
 
@@ -19,7 +19,7 @@ Two containers, both on the host network:
 
 ```
  ┌──────────────┐               ┌──────────────────────┐
- │  Browser     │ ────────────► │  web  :3000          │
+ │  Browser     │ ────────────► │  web  :8080          │
  │  (any host   │   the only    │  Next.js             │
  │   on LAN)    │ ◄──────────── │  UI + /api/* proxy   │
  └──────────────┘   origin it   └──────────┼───────────┘
@@ -68,8 +68,8 @@ the display stays correct either way.
 ### Why --network=host is required
 
 Sonos discovery uses SSDP — UDP multicast to 239.255.255.250:1900.
-Multicast does not cross network-namespace boundaries, so Podman's default
-bridge/slirp4netns modes silently drop every discovery packet. With
+Multicast does not cross network-namespace boundaries, so the default bridge
+mode (or Podman's slirp4netns) silently drops every discovery packet. With
 --network=host the container shares the host's full network stack, so:
 
 - SSDP multicast works identically to a bare-metal process
@@ -80,11 +80,13 @@ bridge/slirp4netns modes silently drop every discovery packet. With
 
 ## Prerequisites
 
-**Podman is pre-installed on Fedora** (Fedora 44 ships with Podman 5.8.x).
-If `make` is missing on a minimal server install:
+**Docker with the Compose plugin**, plus `make`. The Makefile invokes `docker`
+directly, so on Fedora — where Podman is the pre-installed engine — install
+Docker or replace the `docker` calls in the Makefile with `podman`:
 
 ```bash
-sudo dnf install -y make
+sudo dnf install -y make docker-ce docker-compose-plugin
+sudo systemctl enable --now docker
 ```
 
 `ffmpeg` and `yt-dlp` live inside the container image — no host install needed.
@@ -105,14 +107,14 @@ cd youtube-sonos-streamer
 
 # 3. Build and start both containers
 make up
-# → open http://<server-LAN-IP>:3000 from any browser on your LAN
+# → open http://<server-LAN-IP>:8080 from any browser on your LAN
 ```
 
 `make logs` follows both, `make down` stops them. They restart on boot
 (`restart: unless-stopped`), so there is no separate "install as a service"
 step.
 
-**Open :3000, not :5000.** The UI moved to its own container. Port 5000 is now
+**Open :8080, not :5000.** The UI moved to its own container. Port 5000 is now
 the JSON API — the speakers pull audio from it and you can curl it, but a
 browser pointed there gets an endpoint listing, not the app.
 
@@ -120,7 +122,7 @@ browser pointed there gets an endpoint listing, not the app.
 
 | | Port | What it is |
 |---|---|---|
-| `web` | 3000 | Next.js UI. The only thing a browser should open. Proxies `/api/*` to the backend, so there is no CORS and no second origin. |
+| `web` | 8080 | Next.js UI. The only thing a browser should open. Proxies `/api/*` to the backend, so there is no CORS and no second origin. Not 3000: that is Next's default and the port most likely to be taken already on a shared box. |
 | `youtube-sonos` | 5000 | Flask JSON API + media server. Renders no HTML. Talks to the speakers; the speakers fetch `/media/<id>.mp3` from it directly. |
 
 Both run with `network_mode: host`, for different reasons — the backend
@@ -150,6 +152,19 @@ docker compose up -d --build     # or: make up
 
 Compose will not rebuild on a plain `up` when only a build arg has changed.
 
+By default the address is derived from `PORT`, so the two stay in step and you
+never set it directly. Override it only to point the UI at a backend that is
+**not** the `youtube-sonos` service in this compose file:
+
+```bash
+# UI proxying to an API on another host entirely
+API_ORIGIN=http://192.168.1.9:5000 docker compose up -d --build
+```
+
+An explicit `API_ORIGIN` takes `PORT` out of the loop — after that, changing
+`PORT` moves the backend's listener and the UI keeps proxying to the old
+address. That is the point when overriding across hosts, and a trap when not.
+
 ### Upgrading from the Quadlet install
 
 Earlier versions shipped a systemd Quadlet unit. If it is still installed it
@@ -173,7 +188,9 @@ found. On a Mac, run the two halves directly instead:
 
 ```bash
 PORT=5001 make run-local     # backend — 5001, because macOS AirPlay owns 5000
-cd web && pnpm dev           # UI on :3000
+cd web && pnpm dev           # UI on :3000 (next dev's default, not the
+                             # container's :8080 — dev is on your laptop, where
+                             # the server's port collision doesn't apply)
 ```
 
 with `API_ORIGIN=http://127.0.0.1:5001` in `web/.env.local`. See
@@ -184,17 +201,19 @@ with `API_ORIGIN=http://127.0.0.1:5001` in `web/.env.local`. See
 ## Configuration
 
 All configuration is via environment variables — set them under
-`environment:` in docker-compose.yml, or on the podman run command line (-e).
+`environment:` in docker-compose.yml, or on the `docker run` command line (-e).
 
-`API_ORIGIN` is the exception and is **not** in this table: it is a build arg
-of the `web` image, not a runtime variable, because Next compiles the proxy
-target into the build. See "Changing the API address needs a rebuild" above.
+`API_ORIGIN` is the exception and is **not** in this table: it is read at
+`docker compose build` time, not by the running container, because Next
+compiles the proxy target into the image. It defaults to
+`http://127.0.0.1:$PORT` and is worth setting only to reach a backend outside
+this compose file. See "Changing the API address needs a rebuild" above.
 
 | Variable     | Default  | Purpose                                                   |
 |--------------|----------|-----------------------------------------------------------|
 | PORT         | 5000     | TCP port Flask listens on. Also feeds the UI's API_ORIGIN |
 |              |          | build arg, so compose keeps the two in step.              |
-| WEB_PORT     | 3000     | TCP port the Next.js UI listens on — the one to browse to |
+| WEB_PORT     | 8080     | TCP port the Next.js UI listens on — the one to browse to |
 | STREAM_HOST  | (auto)   | LAN IP sent to Sonos as stream origin. Set this if your   |
 |              |          | server has multiple NICs and auto-detection picks the     |
 |              |          | wrong one (e.g. a management or VM bridge interface).     |
@@ -358,7 +377,7 @@ stays at its default, every rebuild reuses the layer built the very first time.
 ```bash
 make docker-update-ytdlp                          # or, equivalently:
 UPDATE_DATE=$(date +%s) docker compose up -d --build
-make update-ytdlp                                 # podman
+make update-ytdlp                                 # standalone image, no compose
 ```
 
 The startup log now reports the version and shouts if it is stale:
@@ -450,12 +469,12 @@ curl -X POST http://$SERVER/api/stop \
 ## Firewall
 
 ```bash
-sudo firewall-cmd --permanent --add-port=3000/tcp   # UI, for browsers
+sudo firewall-cmd --permanent --add-port=8080/tcp   # UI, for browsers
 sudo firewall-cmd --permanent --add-port=5000/tcp   # API, for the speakers
 sudo firewall-cmd --reload
 ```
 
-Both are needed, and for genuinely different callers. 3000 is the UI you open.
+Both are needed, and for genuinely different callers. 8080 is the UI you open.
 5000 is where the *speakers* fetch audio — the browser never touches it
 directly, but leaving it closed means the UI works and playback silently
 never starts, because Sonos cannot reach the stream.
@@ -488,7 +507,7 @@ The `web` container mounts nothing, so it needs no labels.
 | Sonos errors after a few seconds | DRM-protected or live source. Check `make logs` for ffmpeg errors. |
 | Stream URL points to wrong IP | Set STREAM_HOST to the correct LAN interface IP. |
 | 403 Forbidden while downloading | Check the log. `GOOGLEVIDEO 403` means the signed media URL was refused — usually stale cookies. Confirm the startup log says `Using yt-dlp cookies from ...`; if it says `COOKIES PATH IS A DIRECTORY`, run `sudo rm -rf cookies.txt` and create a real one. Then `make update-ytdlp`. |
-| "COOKIES PATH IS A DIRECTORY" at startup | The bind-mount source didn't exist, so podman created a root-owned directory. `sudo rm -rf cookies.txt`, then either export a real cookies.txt or comment out the mount. |
+| "COOKIES PATH IS A DIRECTORY" at startup | The bind-mount source didn't exist, so the engine created a root-owned directory. `sudo rm -rf cookies.txt`, then either export a real cookies.txt or comment out the mount. |
 | Cache empty after every restart | CACHE_DIR isn't on a persistent mount — see The cache volume. |
 | Long gaps between tracks | Downloads aren't keeping up. Check `curl http://$SERVER/api/downloads` and the log for transcode errors, then raise DOWNLOAD_WORKERS. |
 | First song slow to start / stutters | The network is saturated. PREFETCH_GATE (on by default) should already give it the whole uplink; confirm with `/api/downloads` that only the seed is `running` while it downloads. |
@@ -496,7 +515,8 @@ The `web` container mounts nothing, so it needs no labels.
 | Port 5000 in use | `PORT=5001 make up`, and rerun firewall-cmd. If an old Quadlet unit is still installed it is probably the squatter — see "Upgrading from the Quadlet install". |
 | "Scan error: 403 Forbidden" | Something else is answering on the API port. On macOS this is ControlCenter (AirPlay Receiver), which owns :5000 and 403s every path it doesn't know; `curl -i localhost:5000/api/health` showing `Server: AirTunes/…` confirms it. Move the backend to 5001 and point `API_ORIGIN` at it. |
 | UI loads but every action fails | The address baked into the `web` image doesn't match where the API is listening. `API_ORIGIN` is a *build* arg — setting it on the container does nothing. Rebuild: `docker compose up -d --build`. |
-| Browser at :5000 shows JSON, not the app | Working as intended — that is the API. The UI is on :3000. |
+| Browser at :5000 shows JSON, not the app | Working as intended — that is the API. The UI is on :8080. |
+| UI container exits with `EADDRINUSE` | Something else already holds WEB_PORT. `WEB_PORT=8081 make up`, and rerun firewall-cmd. |
 
 ---
 

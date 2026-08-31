@@ -46,7 +46,11 @@ def get_local_ip():
         s.close()
     return ip
 
-PORT = int(os.environ.get('PORT', 8080))
+# 5000 matches what the Containerfile, the Makefile and docker-compose.yml all
+# set, so a bare `python app.py` lands on the same port as every other way of
+# running this. It must NOT be 8080: that is the UI's port, and colliding with
+# it would put the Next server and the media server on one address.
+PORT = int(os.environ.get('PORT', 5000))
 STREAM_HOST = os.environ.get('STREAM_HOST') or get_local_ip()
 
 # --- Cross-origin access ------------------------------------------------------
@@ -283,7 +287,7 @@ def _log_ytdlp_version():
             "of 403s and extraction failures. Rebuild the yt-dlp layer — an ordinary "
             "rebuild will NOT do it, you must bust the build-arg:\n"
             "    UPDATE_DATE=$(date +%s) docker compose up -d --build\n"
-            "    (podman: make update-ytdlp)")
+            "    (standalone image: make update-ytdlp)")
 
 
 # YouTube's #1 failure mode for this server: it decides the host is a bot and
