@@ -15,7 +15,8 @@ import heapq
 import random
 import itertools
 from collections import Counter
-from flask import Flask, jsonify, request, Response, render_template
+from flask import Flask, jsonify, request, Response
+from werkzeug.exceptions import HTTPException
 import soco
 import soco.exceptions
 from soco.data_structures import DidlMusicTrack, DidlResource
@@ -28,7 +29,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__, template_folder='templates')
+# No `template_folder` and no static folder: this app renders nothing. It serves
+# JSON under /api and audio/artwork under /media, and the UI is a separate
+# Next.js app that talks to it over HTTP.
+app = Flask(__name__)
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -44,6 +48,86 @@ def get_local_ip():
 
 PORT = int(os.environ.get('PORT', 8080))
 STREAM_HOST = os.environ.get('STREAM_HOST') or get_local_ip()
+
+# --- Cross-origin access ------------------------------------------------------
+#
+# Off by default, and the frontend does not need it: `web/` proxies /api through
+# its own origin, so the browser only ever makes same-origin requests. This is
+# the escape hatch for the other cases — a browser calling this API directly, or
+# debugging the frontend with the proxy taken out of the picture.
+#
+# Comma-separated origins, or "*". Note that "*" here is honest rather than
+# reckless: there is no auth, session or cookie on this API, so an allowed
+# origin gains nothing a direct request to the port doesn't already have.
+ALLOW_ORIGINS = [o.strip() for o in
+                 os.environ.get('ALLOW_ORIGINS', '').split(',') if o.strip()]
+
+
+def _cors_origin(request_origin):
+    """The Access-Control-Allow-Origin value for this request, or None."""
+    if not ALLOW_ORIGINS or not request_origin:
+        return None
+    if '*' in ALLOW_ORIGINS:
+        # Echo rather than literal "*" so the header stays valid if credentials
+        # are ever added, and so caches key on the actual origin.
+        return request_origin
+    return request_origin if request_origin in ALLOW_ORIGINS else None
+
+
+@app.after_request
+def _apply_cors(response):
+    if not ALLOW_ORIGINS:
+        return response
+    # Set on every response, not just allowed ones: the response body is
+    # origin-dependent either way, and a cache that missed that could hand an
+    # allowed origin's CORS headers to a disallowed one.
+    response.headers.add('Vary', 'Origin')
+    origin = _cors_origin(request.headers.get('Origin'))
+    if origin:
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, HEAD, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        response.headers['Access-Control-Max-Age'] = '86400'
+    return response
+
+
+# Preflights need no route of their own: Flask answers OPTIONS automatically for
+# every rule, and that response passes through _apply_cors like any other.
+
+
+# Flask's default error pages are HTML. A typed JSON client asking for a
+# mistyped endpoint would get an HTML 404 and fail at JSON.parse, reporting
+# "Unexpected token '<'" instead of "no such endpoint" — so every error answers
+# in JSON, whatever goes wrong.
+#
+# This used to be scoped to /api and /media, because the app also served an HTML
+# page at / and an HTML error alongside it was consistent. That page is now a
+# separate Next.js app and this one renders nothing, so the exclusion had no
+# remaining purpose except to hand back Werkzeug's HTML for a near miss like
+# /aip/health — the request most likely to be a client typo and most in need of
+# a parseable answer.
+@app.errorhandler(404)
+def _json_404(e):
+    return jsonify({"error": f"No such endpoint: {request.path}"}), 404
+
+
+@app.errorhandler(405)
+def _json_405(e):
+    return jsonify({"error": f"{request.method} not allowed on {request.path}"}), 405
+
+
+@app.errorhandler(Exception)
+def _json_500(e):
+    """Last resort for an exception no route caught.
+
+    Every endpoint already catches its own failures; this exists so that the one
+    that doesn't returns JSON with the traceback in the log, rather than an HTML
+    500 page that tells the client nothing parseable.
+    """
+    if isinstance(e, HTTPException):
+        return e
+    logger.exception(f"Unhandled exception on {request.method} {request.path}")
+    return jsonify({"error": str(e) or "Internal server error"}), 500
 
 # Shared yt-dlp format selection for audio extraction
 AUDIO_FORMAT = 'bestaudio[acodec=opus]/bestaudio[acodec=vorbis]/bestaudio[ext=m4a]/bestaudio/best'
@@ -155,27 +239,48 @@ def ydl_opts(**extra):
 YTDLP_STALE_DAYS = int(os.environ.get('YTDLP_STALE_DAYS', 14))
 
 
-def _log_ytdlp_version():
+def _ytdlp_status():
+    """yt-dlp version, age and available JS runtimes.
+
+    The two usual suspects behind any download failure, gathered once for both
+    the startup log and /api/health — so the answer to "why is nothing playing"
+    is available over HTTP instead of only in a log line printed at boot.
+    """
     try:
         version = yt_dlp.version.__version__
     except Exception:
-        logger.warning("Could not determine the yt-dlp version")
-        return
+        version = None
     runtimes = [name for name, path in (('deno', shutil.which('deno')),
                                         ('node', shutil.which('node'))) if path]
-    logger.info(f"yt-dlp {version}; JS runtimes: {', '.join(runtimes) or 'NONE'}")
-    if not runtimes:
+    age = None
+    if version:
+        try:
+            released = time.strptime(version[:10], '%Y.%m.%d')
+            age = (time.time() - time.mktime(released)) / 86400
+        except (ValueError, TypeError):
+            age = None
+    return {
+        'version': version,
+        'age_days': None if age is None else int(age),
+        'stale': age is not None and age > YTDLP_STALE_DAYS,
+        'js_runtimes': runtimes,
+    }
+
+
+def _log_ytdlp_version():
+    status = _ytdlp_status()
+    if not status['version']:
+        logger.warning("Could not determine the yt-dlp version")
+    else:
+        logger.info(f"yt-dlp {status['version']}; JS runtimes: "
+                    f"{', '.join(status['js_runtimes']) or 'NONE'}")
+    if not status['js_runtimes']:
         logger.error("No deno or node on PATH — yt-dlp cannot run the JS "
                      "challenge solvers and YouTube extraction will fail.")
-    try:
-        released = time.strptime(version[:10], '%Y.%m.%d')
-    except (ValueError, TypeError):
-        return
-    age = (time.time() - time.mktime(released)) / 86400
-    if age > YTDLP_STALE_DAYS:
+    if status['stale']:
         logger.error(
-            f"yt-dlp is {int(age)} days old. This is the usual cause of 403s "
-            "and extraction failures. Rebuild the yt-dlp layer — an ordinary "
+            f"yt-dlp is {status['age_days']} days old. This is the usual cause "
+            "of 403s and extraction failures. Rebuild the yt-dlp layer — an ordinary "
             "rebuild will NOT do it, you must bust the build-arg:\n"
             "    UPDATE_DATE=$(date +%s) docker compose up -d --build\n"
             "    (podman: make update-ytdlp)")
@@ -1904,7 +2009,57 @@ def station_payload(station):
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    """An index, not a UI. The frontend is a separate Next.js app in `web/`.
+
+    This used to render `templates/index.html`. It answers with JSON instead of
+    404 because the people who reach it are almost all arriving on a stale
+    bookmark of the old UI, and a bare 404 tells them the server is broken when
+    it is running perfectly — the page simply moved to another port. Naming the
+    frontend and the endpoints costs one dict and turns that dead end into
+    directions.
+    """
+    return jsonify({
+        "service": "youtube-to-sonos",
+        "kind": "api",
+        "frontend": "Next.js app in web/ — run `pnpm dev` there, or see docker-compose.yml",
+        "docs": "API.md",
+        # A set, because /api/volume is two rules — GET and POST are registered
+        # separately — and listing it twice reads as a bug in the API rather
+        # than in the listing.
+        "endpoints": sorted({
+            str(rule) for rule in app.url_map.iter_rules()
+            if str(rule).startswith('/api/')
+        }),
+    })
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    """Liveness and configuration. Touches no network, so it answers even when
+    SSDP discovery or YouTube is failing.
+
+    That is the point: without it the only way to ask "is the backend up" is
+    /api/devices, which runs a multicast scan and takes seconds — so a frontend
+    cannot tell "backend down" from "backend fine, no speakers" from "backend
+    fine, YouTube angry". Each needs a different message to the listener.
+    """
+    ytdlp = _ytdlp_status()
+    with _STATE_LOCK:
+        stations = len(STATION)
+    return jsonify({
+        "status": "ok",
+        "stream_host": STREAM_HOST,
+        "port": PORT,
+        "ytdlp_version": ytdlp['version'],
+        "ytdlp_age_days": ytdlp['age_days'],
+        "ytdlp_stale": ytdlp['stale'],
+        "js_runtimes": ytdlp['js_runtimes'],
+        # The value resolved once at import, not a re-probe: _resolve_cookiefile
+        # copies the jar and logs on every call, which a polled endpoint must not do.
+        "cookies": bool(COOKIES_FILE),
+        "stations": stations,
+        "cache_dir": CACHE_DIR,
+    })
+
 
 @app.route('/api/devices', methods=['GET'])
 def get_devices():
@@ -2379,7 +2534,15 @@ def events():
         event_stream(),
         mimetype='text/event-stream',
         headers={
-            'Cache-Control': 'no-cache',
+            # `no-transform` is not decoration. A proxy that gzips this stream
+            # holds it in the compressor's buffer and the client receives
+            # nothing at all — the headers arrive, the bytes never do, and it
+            # is indistinguishable from a wedged speaker. Next.js compresses
+            # proxied responses by default and does exactly this whenever the
+            # browser sends `Accept-Encoding: gzip`, which every browser does
+            # and none can be told not to (it is a forbidden header name, so
+            # EventSource cannot opt out). The fix has to be here.
+            'Cache-Control': 'no-cache, no-transform',
             'X-Accel-Buffering': 'no',  # disable proxy buffering (e.g. nginx)
             'Connection': 'keep-alive',
         }

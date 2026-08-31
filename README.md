@@ -1,7 +1,9 @@
 # YouTube → Sonos Streamer
 
 Stream any YouTube video's audio to a Sonos speaker on your LAN.
-Designed to run as a containerised service on a **Fedora server with Podman**.
+Runs as two containers via **Docker Compose**, designed for a Fedora server
+(Podman works too — the compose file is portable and the Makefile keeps
+podman targets for the API alone).
 
 ---
 
@@ -13,12 +15,21 @@ per song instead of once per play, which is what keeps the server off YouTube's
 bot radar — and because each queue item is a genuine file, the speaker's own
 next / previous / seek controls work.
 
+Two containers, both on the host network:
+
 ```
- ┌──────────────┐  YouTube URL  ┌─────────────────────────────────────────┐
- │  Browser     │ ────────────► │   Podman container  (--network=host)    │
- │  (any host   │               │                                         │
- │   on LAN)    │               │   Flask                                 │
- └──────────────┘               │   ├── /api/devices    → soco SSDP scan  │
+ ┌──────────────┐               ┌──────────────────────┐
+ │  Browser     │ ────────────► │  web  :3000          │
+ │  (any host   │   the only    │  Next.js             │
+ │   on LAN)    │ ◄──────────── │  UI + /api/* proxy   │
+ └──────────────┘   origin it   └──────────┼───────────┘
+                    ever talks             │ same-origin /api,
+                    to                     │ so no CORS
+                                           ▼
+                                ┌─────────────────────────────────────────┐
+                                │  youtube-sonos  :5000                   │
+                                │  Flask — JSON only, renders no HTML     │
+                                │   ├── /api/devices    → soco SSDP scan  │
                                 │   ├── /api/play       → build the queue │
                                 │   ├── /api/transport  → next/prev/seek  │
                                 │   ├── /api/station    → queue + cache   │
@@ -33,9 +44,13 @@ next / previous / seek controls work.
                                            ▼
                                     ┌────────────┐
                                     │  Sonos     │ ◄── pulls /media/*.mp3
-                                    │  Speaker   │     from the local cache
-                                    └────────────┘
+                                    │  Speaker   │     straight from Flask
+                                    └────────────┘     on :5000, not via Next
 ```
+
+The browser only ever talks to Next; the *speakers* only ever talk to Flask.
+That split is why `STREAM_HOST` must stay an address the speakers can reach,
+and must never be pointed at the Next server — which serves no audio.
 
 ### The cache window
 
@@ -83,66 +98,103 @@ sudo dnf install -y make
 git clone https://github.com/yourname/youtube-sonos-streamer
 cd youtube-sonos-streamer
 
-# 2. Build the image
-make build
+# 2. Export YouTube cookies to ./cookies.txt (optional but recommended).
+#    To run without them, comment the mount out of docker-compose.yml and set
+#    COOKIES_FILE: "" — see "Cookies" below. Do NOT skip this step and leave
+#    the mount in place; the file must exist before `up`.
 
-# 3. Run in the foreground to test
-make run
-# → open http://<server-LAN-IP>:5000 from any browser on your LAN
+# 3. Build and start both containers
+make up
+# → open http://<server-LAN-IP>:3000 from any browser on your LAN
 ```
 
-Press Ctrl-C to stop the test run.
+`make logs` follows both, `make down` stops them. They restart on boot
+(`restart: unless-stopped`), so there is no separate "install as a service"
+step.
 
----
+**Open :3000, not :5000.** The UI moved to its own container. Port 5000 is now
+the JSON API — the speakers pull audio from it and you can curl it, but a
+browser pointed there gets an endpoint listing, not the app.
 
-## Permanent service via systemd Quadlet
+### The two containers
 
-Quadlets are Podman's native systemd integration (Podman >= 4.4, Fedora 38+).
-A .container file replaces both a docker-compose.yml and a hand-written
-systemd unit.
+| | Port | What it is |
+|---|---|---|
+| `web` | 3000 | Next.js UI. The only thing a browser should open. Proxies `/api/*` to the backend, so there is no CORS and no second origin. |
+| `youtube-sonos` | 5000 | Flask JSON API + media server. Renders no HTML. Talks to the speakers; the speakers fetch `/media/<id>.mp3` from it directly. |
 
-### System-wide service (runs as root)
+Both run with `network_mode: host`, for different reasons — the backend
+because SSDP multicast does not cross network namespaces, the frontend because
+the backend is on the host's network stack and has no bridge address to proxy
+to. Neither can be moved to a bridge network without breaking.
+
+`PORT` and `WEB_PORT` move them:
 
 ```bash
-make install-quadlet
-# equivalent to:
-#   sudo cp quadlet/youtube-sonos.container /etc/containers/systemd/
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now youtube-sonos
+PORT=5001 WEB_PORT=8080 make up
 ```
 
-Check it:
+`PORT` feeds both the backend's listener *and* the address compiled into the
+UI, so they cannot drift apart.
+
+### Changing the API address needs a rebuild
+
+Next resolves its `/api` proxy rewrite at **build** time and writes the result
+into the image. `API_ORIGIN` is therefore a build arg, and setting it on a
+running container does nothing whatsoever — silently: the UI still boots and
+renders, and only the API calls fail. Always use:
 
 ```bash
-sudo systemctl status youtube-sonos
-journalctl -u youtube-sonos -f
+docker compose up -d --build     # or: make up
 ```
 
-### Rootless service (runs as your user)
+Compose will not rebuild on a plain `up` when only a build arg has changed.
+
+### Upgrading from the Quadlet install
+
+Earlier versions shipped a systemd Quadlet unit. If it is still installed it
+owns port 5000 and compose will collide with it. Remove it first:
 
 ```bash
-mkdir -p ~/.config/containers/systemd
-cp quadlet/youtube-sonos.container ~/.config/containers/systemd/
-systemctl --user daemon-reload
-systemctl --user enable --now youtube-sonos
+sudo systemctl disable --now youtube-sonos
+sudo rm /etc/containers/systemd/youtube-sonos.container
+sudo systemctl daemon-reload
+# rootless variant: systemctl --user disable --now youtube-sonos
+#                   rm ~/.config/containers/systemd/youtube-sonos.container
 ```
 
-Note on rootless + --network=host:
-Rootless Podman on Fedora supports --network=host but the container still
-runs with your UID's privileges. SSDP multicast join (IP_ADD_MEMBERSHIP)
-works fine without extra capabilities. If you see "permission denied" on the
-multicast socket, switch to the system service install instead.
+The cache in `./cache` is untouched by this and carries over.
+
+### macOS
+
+Compose targets the Linux server. Docker Desktop's host networking is a
+VM-side shim, so SSDP multicast never reaches the LAN and no speakers are
+found. On a Mac, run the two halves directly instead:
+
+```bash
+PORT=5001 make run-local     # backend — 5001, because macOS AirPlay owns 5000
+cd web && pnpm dev           # UI on :3000
+```
+
+with `API_ORIGIN=http://127.0.0.1:5001` in `web/.env.local`. See
+"Troubleshooting" for why 5000 fails on macOS specifically.
 
 ---
 
 ## Configuration
 
-All configuration is via environment variables — set them in the Quadlet file
-(Environment=) or on the podman run command line (-e).
+All configuration is via environment variables — set them under
+`environment:` in docker-compose.yml, or on the podman run command line (-e).
+
+`API_ORIGIN` is the exception and is **not** in this table: it is a build arg
+of the `web` image, not a runtime variable, because Next compiles the proxy
+target into the build. See "Changing the API address needs a rebuild" above.
 
 | Variable     | Default  | Purpose                                                   |
 |--------------|----------|-----------------------------------------------------------|
-| PORT         | 5000     | TCP port Flask listens on                                 |
+| PORT         | 5000     | TCP port Flask listens on. Also feeds the UI's API_ORIGIN |
+|              |          | build arg, so compose keeps the two in step.              |
+| WEB_PORT     | 3000     | TCP port the Next.js UI listens on — the one to browse to |
 | STREAM_HOST  | (auto)   | LAN IP sent to Sonos as stream origin. Set this if your   |
 |              |          | server has multiple NICs and auto-detection picks the     |
 |              |          | wrong one (e.g. a management or VM bridge interface).     |
@@ -186,11 +238,12 @@ All configuration is via environment variables — set them in the Quadlet file
 ### The cache volume
 
 `CACHE_DIR` must be a **writable, persistent** mount, or every restart
-re-downloads everything from YouTube:
+re-downloads everything from YouTube. docker-compose.yml binds `./cache`; point
+it elsewhere by editing that line:
 
-```ini
-[Container]
-Volume=/srv/youtube-sonos-cache:/app/cache:z
+```yaml
+    volumes:
+      - /srv/youtube-sonos-cache:/app/cache:z
 ```
 
 A 17-song window at the default bitrate is roughly 100 MB. The container runs as
@@ -203,19 +256,22 @@ root, so a rootless install needs the host directory owned by the mapped UID.
 ip -4 addr show | grep inet | grep -v 127
 ```
 
-Then in /etc/containers/systemd/youtube-sonos.container:
+Then in docker-compose.yml, under the `youtube-sonos` service:
 
-```ini
-[Container]
-Environment=STREAM_HOST=192.168.1.42
+```yaml
+    environment:
+      STREAM_HOST: 192.168.1.42
 ```
 
-After editing the Quadlet file:
+And apply it:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl restart youtube-sonos
+make up
 ```
+
+This one *is* a runtime variable, so a restart is enough — no rebuild. Check it
+took with `curl localhost:5000/api/health`, which echoes back the
+`stream_host` it will hand to the speakers.
 
 ---
 
@@ -394,11 +450,15 @@ curl -X POST http://$SERVER/api/stop \
 ## Firewall
 
 ```bash
-sudo firewall-cmd --permanent --add-port=5000/tcp
+sudo firewall-cmd --permanent --add-port=3000/tcp   # UI, for browsers
+sudo firewall-cmd --permanent --add-port=5000/tcp   # API, for the speakers
 sudo firewall-cmd --reload
 ```
 
-Sonos pulls the stream from the server on the same port — one rule covers both UI and audio.
+Both are needed, and for genuinely different callers. 3000 is the UI you open.
+5000 is where the *speakers* fetch audio — the browser never touches it
+directly, but leaving it closed means the UI works and playback silently
+never starts, because Sonos cannot reach the stream.
 
 ---
 
@@ -408,11 +468,15 @@ Running with --network=host, SELinux in Enforcing mode (Fedora default)
 requires no extra policy changes.
 
 Host-path volume mounts do need a label, so append :z (shared) or :Z (private)
-— both the cookies file and the audio cache already do this:
+— both the cookies file and the audio cache already do this in
+docker-compose.yml:
 
-```ini
-Volume=/srv/youtube-sonos-cache:/app/cache:z
+```yaml
+      - ./cache:/app/cache:z
+      - ./cookies.txt:/app/cookies.txt:ro,z
 ```
+
+The `web` container mounts nothing, so it needs no labels.
 
 ---
 
@@ -421,7 +485,7 @@ Volume=/srv/youtube-sonos-cache:/app/cache:z
 | Symptom | Fix |
 |---------|-----|
 | "No Sonos devices found" | Confirm speakers are on, same subnet. Test on host: python3 -c "import soco; print(list(soco.discover()))" |
-| Sonos errors after a few seconds | DRM-protected or live source. Check journalctl -u youtube-sonos for ffmpeg errors. |
+| Sonos errors after a few seconds | DRM-protected or live source. Check `make logs` for ffmpeg errors. |
 | Stream URL points to wrong IP | Set STREAM_HOST to the correct LAN interface IP. |
 | 403 Forbidden while downloading | Check the log. `GOOGLEVIDEO 403` means the signed media URL was refused — usually stale cookies. Confirm the startup log says `Using yt-dlp cookies from ...`; if it says `COOKIES PATH IS A DIRECTORY`, run `sudo rm -rf cookies.txt` and create a real one. Then `make update-ytdlp`. |
 | "COOKIES PATH IS A DIRECTORY" at startup | The bind-mount source didn't exist, so podman created a root-owned directory. `sudo rm -rf cookies.txt`, then either export a real cookies.txt or comment out the mount. |
@@ -429,8 +493,10 @@ Volume=/srv/youtube-sonos-cache:/app/cache:z
 | Long gaps between tracks | Downloads aren't keeping up. Check `curl http://$SERVER/api/downloads` and the log for transcode errors, then raise DOWNLOAD_WORKERS. |
 | First song slow to start / stutters | The network is saturated. PREFETCH_GATE (on by default) should already give it the whole uplink; confirm with `/api/downloads` that only the seed is `running` while it downloads. |
 | Cache directory growing without bound | Eviction only runs while a station is active. Check the log for "Evicted" lines. |
-| Port 5000 in use | Change PORT=8080 in Quadlet and rerun firewall-cmd |
-| Rootless multicast denied | Switch to system-wide install (make install-quadlet) |
+| Port 5000 in use | `PORT=5001 make up`, and rerun firewall-cmd. If an old Quadlet unit is still installed it is probably the squatter — see "Upgrading from the Quadlet install". |
+| "Scan error: 403 Forbidden" | Something else is answering on the API port. On macOS this is ControlCenter (AirPlay Receiver), which owns :5000 and 403s every path it doesn't know; `curl -i localhost:5000/api/health` showing `Server: AirTunes/…` confirms it. Move the backend to 5001 and point `API_ORIGIN` at it. |
+| UI loads but every action fails | The address baked into the `web` image doesn't match where the API is listening. `API_ORIGIN` is a *build* arg — setting it on the container does nothing. Rebuild: `docker compose up -d --build`. |
+| Browser at :5000 shows JSON, not the app | Working as intended — that is the API. The UI is on :3000. |
 
 ---
 
@@ -438,15 +504,28 @@ Volume=/srv/youtube-sonos-cache:/app/cache:z
 
 ```
 youtube-sonos-streamer/
-├── Containerfile                    Podman image (layered for fast yt-dlp updates)
-├── .containerignore                 Build context exclusions
-├── app.py                           Flask app: download cache + Sonos queue control
-├── templates/
-│   └── index.html                   Single-page web UI
-├── cache/                           Downloaded audio (gitignored; mount a volume here)
+├── docker-compose.yml               Both containers — this is the deployment
+├── Makefile                         up / down / logs / build / update helpers
+├── API.md                           The contract between backend and frontend
+│
+├── app.py                           Flask JSON API: download cache + Sonos queue control
+├── Containerfile                    API image (layered for fast yt-dlp updates)
+├── .containerignore                 API build context exclusions — note it drops web/
 ├── requirements.txt                 Python deps
-├── quadlet/
-│   └── youtube-sonos.container      systemd Quadlet unit file
-├── Makefile                         build / run / update / install helpers
+│
+├── web/                             Next.js frontend (App Router, Tailwind, shadcn/ui)
+│   ├── Dockerfile                   UI image (multi-stage, standalone output)
+│   ├── .dockerignore                Drops .env* — see "Changing the API address"
+│   ├── next.config.ts               Proxies /api/* to the Flask backend
+│   └── src/
+│       ├── app/                     Page shell and layout
+│       ├── components/              UI, kept thin over lib/
+│       └── lib/                     All decision logic — pure and unit-tested
+│
+├── cache/                           Downloaded audio (gitignored; bind-mounted)
+├── cookies.txt                      yt-dlp session cookies (gitignored; bind-mounted :ro)
 └── README.md
 ```
+
+There is no `templates/` any more, and no `quadlet/`. The UI is `web/`; the
+deployment is `docker-compose.yml`.

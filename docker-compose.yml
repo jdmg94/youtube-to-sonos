@@ -1,9 +1,26 @@
 # Works with both Docker (`docker compose`) and Podman (`podman-compose`
 # or `podman compose`).
 #
-# Host networking is REQUIRED: Sonos discovery uses SSDP multicast, which
-# does not cross network namespaces, and the speakers must be able to reach
-# this server to pull the audio stream.
+# Two services: `youtube-sonos` is the Flask JSON API and media server, `web`
+# is the Next.js UI. Open the UI on :3000; :5000 is for the speakers and for
+# curl. Nothing but `web` should be reachable from a browser.
+#
+# Host networking is REQUIRED, for a different reason in each service.
+#   youtube-sonos — Sonos discovery is SSDP multicast, which does not cross
+#     network namespaces, and the speakers must reach this host to pull audio.
+#   web — its only job is to proxy /api to the backend, and the backend is on
+#     the host's network stack, not on any bridge. A bridged `web` has no route
+#     to it and no DNS name for it: host networking is what makes `127.0.0.1`
+#     mean the same thing in both containers.
+#
+# Ports are not published because host networking ignores `ports:` entirely —
+# the containers bind the host's interfaces directly. `PORT`/`WEB_PORT` are
+# what move them.
+#
+# NOTE for macOS: this file targets the Linux server. Docker Desktop's host
+# networking is a VM-side shim, so SSDP multicast never reaches the LAN and
+# discovery finds nothing. Develop on the Mac with `pnpm dev` + `make
+# run-local`; test compose on the machine that will run it.
 services:
   youtube-sonos:
     build:
@@ -40,4 +57,46 @@ services:
       # Downloaded songs. Persisting this is the whole point of the cache:
       # a re-listen costs zero YouTube requests. Writable, so no :ro here.
       - ./cache:/app/cache:z
+    restart: unless-stopped
+    # /api/health and not /api/devices: health must answer "is this process
+    # serving" and nothing else. Hanging it off discovery would mark the API
+    # down — and, through `depends_on`, hold the UI back — every time SSDP has
+    # a bad minute, which is precisely when someone wants to open the UI and
+    # look. curl is already in the image (the Containerfile fetches deno with
+    # it), so this costs no package.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${PORT:-5000}/api/health"]
+      interval: 30s
+      timeout: 5s
+      # yt-dlp and soco import slowly and cache_scan() walks the cache dir
+      # before the first request is served.
+      start_period: 30s
+      retries: 3
+
+  web:
+    build:
+      context: ./web
+      args:
+        # Where the Next server proxies /api. A *build* arg, not an
+        # environment variable, and that distinction is not cosmetic: Next
+        # evaluates `rewrites()` during `next build` and writes the resolved
+        # destination into .next/routes-manifest.json. Setting API_ORIGIN on
+        # the running container has no effect whatsoever — and fails silently,
+        # because the UI boots normally and only the /api calls 404.
+        #
+        # Interpolating PORT keeps it pinned to whatever the backend above is
+        # actually listening on. Compose does not rebuild on `up` when a build
+        # arg changes, so changing PORT needs `up -d --build`.
+        API_ORIGIN: http://127.0.0.1:${PORT:-5000}
+    network_mode: host
+    environment:
+      # The UI's own port — this is the one to open in a browser.
+      PORT: ${WEB_PORT:-3000}
+    # Ordering only, not a guarantee: the UI is a client of the API like any
+    # other and renders its own error states when it is down. Waiting for
+    # healthy just avoids handing someone a "Scan error" banner during the
+    # ~10s the backend spends importing yt-dlp on a cold `up`.
+    depends_on:
+      youtube-sonos:
+        condition: service_healthy
     restart: unless-stopped

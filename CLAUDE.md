@@ -4,25 +4,61 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Flask app that plays YouTube audio on Sonos speakers on the LAN. Songs are downloaded and transcoded to a local disk cache ahead of time, and Sonos plays them from a real queue of per-track URLs served by this app. It runs as a Podman container on a Fedora server (systemd Quadlet), but can also run locally.
+Plays YouTube audio on Sonos speakers on the LAN. Songs are downloaded and transcoded to a local disk cache ahead of time, and Sonos plays them from a real queue of per-track URLs served by this app.
+
+**Two deployables, one repo:**
+
+* `app.py` — Flask **JSON API and media server**. Renders no HTML at all.
+* `web/` — **Next.js frontend** (App Router, TypeScript, Tailwind v4, shadcn/ui). It proxies `/api/*` to the backend via a rewrite in `next.config.ts`, so the browser only ever makes same-origin requests and CORS stays off.
+
+The browser talks only to Next; the *speakers* talk only to Flask, fetching `/media/<id>.mp3` directly over the LAN. That split is why `STREAM_HOST` must stay an address the speakers can reach and must never point at the Next server, which does not serve audio.
 
 ## Commands
 
 ```bash
-make run-local      # local dev: uv venv + install deps + run app.py (PORT=5000 default)
-make build          # build the Podman image
-make run            # run container in foreground with --network=host
+# Deployment — both containers, via docker-compose.yml
+make up             # build + start API and UI; UI on :3000, API on :5000
+make down / logs / ps / restart
+make docker-update-ytdlp  # rebuild busting the yt-dlp layer (see below)
+
+# Backend alone
+make run-local      # local dev: uv venv + install deps + run app.py
+make build / run    # standalone Podman image, --network=host
 make update-ytdlp   # rebuild only the yt-dlp layer (fixes YouTube extractor breakage / 403s)
-make install-quadlet  # install as system-wide systemd service (requires sudo)
+
+# Frontend (in web/ — pnpm, not npm)
+pnpm dev            # dev server, proxying /api to API_ORIGIN
+pnpm test           # node --test; the logic in src/lib is fully covered
+pnpm typecheck      # next typegen && tsc --noEmit
+pnpm lint           # eslint, incl. React Compiler rules
+pnpm build          # production build (output: standalone, for Docker)
 ```
 
-There are no tests or linters configured.
+The backend still has no tests or linters. The frontend has all four gates above and they are expected to stay green.
 
-Note: `app.py` defaults to `PORT=8080` when run directly, but the Makefile, Containerfile, and Quadlet all set `PORT=5000`.
+Notes on ports:
+
+* `app.py` defaults to `PORT=8080` when run directly; the Makefile and Containerfile set `PORT=5000`.
+* `next.config.ts` defaults `API_ORIGIN` to `http://127.0.0.1:5000` to match the container.
+* **On macOS, `:5000` is taken by ControlCenter (AirPlay Receiver)**, which answers every path with a bare `403 Forbidden` (`Server: AirTunes/…`). The proxy forwards to it happily and the UI shows "Scan error: 403 Forbidden", which looks like a broken backend rather than a port collision. Run the backend on `PORT=5001` and set `API_ORIGIN` to match in `web/.env.local`.
+
+## Deployment
+
+`docker-compose.yml` runs both images. `PORT` (default 5000) and `WEB_PORT` (default 3000) move them; `PORT` is interpolated into *both* the backend's env and the UI's `API_ORIGIN` build arg, so the two cannot drift.
+
+**`API_ORIGIN` is a build arg, not a runtime env var, and this is the single easiest thing to get wrong here.** Next evaluates `rewrites()` during `next build` and writes the resolved destination into `.next/routes-manifest.json`, so the backend address is compiled into the image. Setting `API_ORIGIN` on the *running container* does nothing at all — and does it silently: the UI boots, renders, and every `/api` call fails against whatever address was baked. Changing it means `docker compose up -d --build`, because Compose does not rebuild on `up` when only a build arg changed.
+
+The same mechanism is why `web/.dockerignore` excludes `.env*`. A developer's `.env.local` holding the macOS `:5001` workaround, left in the build context, ships an image that talks to a port existing only on that laptop.
+
+Both services need `network_mode: host`: the backend because SSDP multicast does not cross network namespaces and the speakers must reach it to pull audio, the frontend because the backend is on the host's stack and has no bridge address or DNS name to proxy to. Under bridge networking `/api/health` reports `stream_host` as the container's own `172.17.x.x` — an address no speaker can fetch from, which is the visible symptom of getting this wrong.
+
+Docker Desktop on macOS cannot do any of this: its host networking is a VM-side shim, so SSDP never reaches the LAN and discovery finds nothing. Develop on macOS with `make run-local` + `pnpm dev`; run compose on the Linux box.
 
 ## Architecture
 
-Everything lives in two files: `app.py` (backend) and `templates/index.html` (single-page UI with inline CSS/JS, ~2300 lines).
+The backend is one file, `app.py`. The frontend lives in `web/src`, with all decision logic in `web/src/lib` (pure, unit-tested) and React components kept thin over it.
+
+`API.md` is the contract between them.
 
 ### Playback pipeline (the core flow)
 
@@ -133,7 +169,9 @@ Because each queue item is a real tagged file, `_now_playing_payload` reads titl
 
 ### Other endpoints
 
-`/api/devices` (SSDP scan), `/api/downloads` (scheduler introspection), `/api/info` (metadata only), `/api/play` (`mode`: `auto`/`now`/`next`), `/api/transport` (POST: next/prev/play/pause/seek/jump against the speaker's own queue), `/api/station` (ordered list + cursor + per-track cache status), `/api/station/refresh` (POST: discard everything queued after the playing track and refill it with unheard songs — the UI's Refresh button), `/api/stop` (also tears down the station so it stops prefetching), `/api/volume` (GET/POST), `/media/<id>.jpg` (album art — Sonos won't fetch YouTube's CDN). Most endpoints fall back to the first discovered speaker when `device_ip` is omitted. Queue and transport commands always go through `_coordinator()`, since they must target the group coordinator.
+`/` (JSON index — the frontend moved to `web/`, and this says so rather than 404ing a stale bookmark of the old UI), `/api/health` (liveness + config, touches no network), `/api/devices` (SSDP scan), `/api/downloads` (scheduler introspection), `/api/info` (metadata only), `/api/play` (`mode`: `auto`/`now`/`next`), `/api/transport` (POST: next/prev/play/pause/seek/jump against the speaker's own queue), `/api/station` (ordered list + cursor + per-track cache status), `/api/station/refresh` (POST: discard everything queued after the playing track and refill it with unheard songs — the UI's Refresh button), `/api/stop` (also tears down the station so it stops prefetching), `/api/volume` (GET/POST), `/media/<id>.jpg` (album art — Sonos won't fetch YouTube's CDN). Most endpoints fall back to the first discovered speaker when `device_ip` is omitted. Queue and transport commands always go through `_coordinator()`, since they must target the group coordinator.
+
+**Every response is JSON, including errors.** The 404/405/500 handlers are unconditional — there is no HTML anywhere in this app, so a near-miss like `/aip/health` (the request most likely to be a client typo) answers in the one format the client can parse.
 
 ### Cache layout
 

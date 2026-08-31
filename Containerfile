@@ -35,7 +35,8 @@ RUN mkdir -p /app/cache
 ENV CACHE_DIR=/app/cache
 
 # Layer 4: Application code (frequently changed)
-COPY templates/ templates/
+# app.py alone — this image is the API and media server. The UI has its own
+# image built from web/, and nothing here renders HTML.
 COPY app.py .
 
 EXPOSE 5000

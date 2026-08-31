@@ -11,6 +11,12 @@ __pycache__
 quadlet
 Makefile
 README.md
+API.md
+CLAUDE.md
+# The frontend is a separate image built from web/ with its own Dockerfile.
+# Without this the backend build context is ~1GB of node_modules and .next,
+# uploaded to the daemon on every `make build` to be thrown away unread.
+web
 .gemini
 antigravity-ide
 # yt-dlp cookies are delivered via read-only volume mount, not baked into the image
