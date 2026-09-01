@@ -46,11 +46,11 @@ def get_local_ip():
         s.close()
     return ip
 
-# 5000 matches what the Containerfile, the Makefile and docker-compose.yml all
+# 5001 matches what the Containerfile, the Makefile and docker-compose.yml all
 # set, so a bare `python app.py` lands on the same port as every other way of
-# running this. It must NOT be 8080: that is the UI's port, and colliding with
+# running this. It must NOT be 5000: that is the UI's port, and colliding with
 # it would put the Next server and the media server on one address.
-PORT = int(os.environ.get('PORT', 5000))
+PORT = int(os.environ.get('PORT', 5001))
 STREAM_HOST = os.environ.get('STREAM_HOST') or get_local_ip()
 
 # --- Cross-origin access ------------------------------------------------------

@@ -7,11 +7,13 @@
 IMAGE_NAME = youtube-sonos-streamer
 # The API's port. Also interpolated into the UI's API_ORIGIN build arg by
 # docker-compose.yml, so the two cannot drift.
-PORT ?= 5000
+PORT ?= 5001
 # The UI's port — the one to open in a browser. Not Next's own default 3000:
 # that port is the first thing anything else on a shared box claims, and the UI
-# losing the bind is a failure that only shows up as a dead browser tab.
-WEB_PORT ?= 8080
+# losing the bind is a failure that only shows up as a dead browser tab. 5000 is
+# the address people already have bookmarked from when the API lived there; the
+# API, which no human opens, is the cheaper of the two to move.
+WEB_PORT ?= 5000
 
 
 # --- compose (the deployment) ------------------------------------------------
@@ -70,10 +72,11 @@ run:
 		-v ./cookies.txt:/app/cookies.txt:ro,z \
 		-v ./cache:/app/cache:z $(IMAGE_NAME)
 
-# Local dev backend. On macOS pass PORT=5001: ControlCenter (AirPlay Receiver)
-# owns :5000 and answers every path with a bare 403, which surfaces in the UI as
-# "Scan error: 403 Forbidden" and looks like a broken backend. Point the UI at
-# the same port via API_ORIGIN in web/.env.local.
+# Local dev backend. 5001 works on macOS too: ControlCenter (AirPlay Receiver)
+# owns :5000 and answers every path with a bare 403, which used to surface in
+# the UI as "Scan error: 403 Forbidden" and look like a broken backend — the
+# reason the backend does not sit on 5000 anymore. `pnpm dev` serves the UI on
+# :3000 there, so nothing of ours wants :5000 on a Mac.
 run-local:
 	uv venv && . .venv/bin/activate && uv pip install -r requirements.txt && PORT=$(PORT) python app.py
 

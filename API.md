@@ -4,8 +4,10 @@ The contract between the Flask backend and any client. This is the source of
 truth for `web/lib/api/types.ts`; when an endpoint changes, change it here in
 the same commit.
 
-Base URL is the Flask server, `http://<host>:<PORT>` (`PORT` defaults to 5000
-in the container and Makefile, 8080 when `app.py` is run directly).
+Base URL is the Flask server, `http://<host>:<PORT>` (`PORT` defaults to 5001
+everywhere — the container, the Makefile, and a bare `python app.py`). The UI
+is the one on :5000; nothing here is served from it except through its /api
+proxy.
 
 ## Conventions
 
@@ -60,7 +62,7 @@ angry".
 {
   "status": "ok",
   "stream_host": "192.168.1.50",
-  "port": 5000,
+  "port": 5001,
   "ytdlp_version": "2025.08.11",
   "ytdlp_age_days": 3,
   "ytdlp_stale": false,
@@ -159,7 +161,7 @@ radio stream.
   "queued_next": false,
   "device": "Kitchen",
   "device_ip": "192.168.1.31",
-  "stream_url": "http://192.168.1.50:5000/media/dQw4w9WgXcQ.mp3",
+  "stream_url": "http://192.168.1.50:5001/media/dQw4w9WgXcQ.mp3",
   "autoplay": true,
   "video_id": "dQw4w9WgXcQ",
   "title": "Never Gonna Give You Up"
@@ -276,12 +278,12 @@ truncate safely.
   "state": "PLAYING",
   "title": "Never Gonna Give You Up",
   "artist": "Rick Astley",
-  "album_art": "http://192.168.1.50:5000/media/dQw4w9WgXcQ.jpg",
+  "album_art": "http://192.168.1.50:5001/media/dQw4w9WgXcQ.jpg",
   "duration": "0:03:33",
   "position": "0:01:12",
   "playlist_position": 3,
   "station_index": 2,
-  "uri": "http://192.168.1.50:5000/media/dQw4w9WgXcQ.mp3",
+  "uri": "http://192.168.1.50:5001/media/dQw4w9WgXcQ.mp3",
   "is_radio": true,
   "video_id": "dQw4w9WgXcQ",
   "device": "Kitchen",

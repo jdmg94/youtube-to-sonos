@@ -19,7 +19,7 @@ Two containers, both on the host network:
 
 ```
  ┌──────────────┐               ┌──────────────────────┐
- │  Browser     │ ────────────► │  web  :8080          │
+ │  Browser     │ ────────────► │  web  :5000          │
  │  (any host   │   the only    │  Next.js             │
  │   on LAN)    │ ◄──────────── │  UI + /api/* proxy   │
  └──────────────┘   origin it   └──────────┼───────────┘
@@ -27,7 +27,7 @@ Two containers, both on the host network:
                     to                     │ so no CORS
                                            ▼
                                 ┌─────────────────────────────────────────┐
-                                │  youtube-sonos  :5000                   │
+                                │  youtube-sonos  :5001                   │
                                 │  Flask — JSON only, renders no HTML     │
                                 │   ├── /api/devices    → soco SSDP scan  │
                                 │   ├── /api/play       → build the queue │
@@ -45,7 +45,7 @@ Two containers, both on the host network:
                                     ┌────────────┐
                                     │  Sonos     │ ◄── pulls /media/*.mp3
                                     │  Speaker   │     straight from Flask
-                                    └────────────┘     on :5000, not via Next
+                                    └────────────┘     on :5001, not via Next
 ```
 
 The browser only ever talks to Next; the *speakers* only ever talk to Flask.
@@ -107,23 +107,23 @@ cd youtube-sonos-streamer
 
 # 3. Build and start both containers
 make up
-# → open http://<server-LAN-IP>:8080 from any browser on your LAN
+# → open http://<server-LAN-IP>:5000 from any browser on your LAN
 ```
 
 `make logs` follows both, `make down` stops them. They restart on boot
 (`restart: unless-stopped`), so there is no separate "install as a service"
 step.
 
-**Open :8080, not :5000.** The UI moved to its own container. Port 5000 is now
-the JSON API — the speakers pull audio from it and you can curl it, but a
-browser pointed there gets an endpoint listing, not the app.
+**Open :5000, not :5001.** :5000 is the UI. The JSON API moved to :5001 — the
+speakers pull audio from it and you can curl it, but a browser pointed there
+gets an endpoint listing, not the app.
 
 ### The two containers
 
 | | Port | What it is |
 |---|---|---|
-| `web` | 8080 | Next.js UI. The only thing a browser should open. Proxies `/api/*` to the backend, so there is no CORS and no second origin. Not 3000: that is Next's default and the port most likely to be taken already on a shared box. |
-| `youtube-sonos` | 5000 | Flask JSON API + media server. Renders no HTML. Talks to the speakers; the speakers fetch `/media/<id>.mp3` from it directly. |
+| `web` | 5000 | Next.js UI. The only thing a browser should open. Proxies `/api/*` to the backend, so there is no CORS and no second origin. Not 3000: that is Next's default and the port most likely to be taken already on a shared box. |
+| `youtube-sonos` | 5001 | Flask JSON API + media server. Renders no HTML. Talks to the speakers; the speakers fetch `/media/<id>.mp3` from it directly. |
 
 Both run with `network_mode: host`, for different reasons — the backend
 because SSDP multicast does not cross network namespaces, the frontend because
@@ -133,7 +133,7 @@ to. Neither can be moved to a bridge network without breaking.
 `PORT` and `WEB_PORT` move them:
 
 ```bash
-PORT=5001 WEB_PORT=8080 make up
+PORT=5002 WEB_PORT=8080 make up
 ```
 
 `PORT` feeds both the backend's listener *and* the address compiled into the
@@ -158,7 +158,7 @@ never set it directly. Override it only to point the UI at a backend that is
 
 ```bash
 # UI proxying to an API on another host entirely
-API_ORIGIN=http://192.168.1.9:5000 docker compose up -d --build
+API_ORIGIN=http://192.168.1.9:5001 docker compose up -d --build
 ```
 
 An explicit `API_ORIGIN` takes `PORT` out of the loop — after that, changing
@@ -168,7 +168,8 @@ address. That is the point when overriding across hosts, and a trap when not.
 ### Upgrading from the Quadlet install
 
 Earlier versions shipped a systemd Quadlet unit. If it is still installed it
-owns port 5000 and compose will collide with it. Remove it first:
+owns port 5000 — now the UI's — and compose will collide with it. Remove it
+first:
 
 ```bash
 sudo systemctl disable --now youtube-sonos
@@ -187,14 +188,16 @@ VM-side shim, so SSDP multicast never reaches the LAN and no speakers are
 found. On a Mac, run the two halves directly instead:
 
 ```bash
-PORT=5001 make run-local     # backend — 5001, because macOS AirPlay owns 5000
+make run-local               # backend on :5001 — the default, and clear of the
+                             # macOS AirPlay Receiver that owns :5000
 cd web && pnpm dev           # UI on :3000 (next dev's default, not the
-                             # container's :8080 — dev is on your laptop, where
+                             # container's :5000 — dev is on your laptop, where
                              # the server's port collision doesn't apply)
 ```
 
-with `API_ORIGIN=http://127.0.0.1:5001` in `web/.env.local`. See
-"Troubleshooting" for why 5000 fails on macOS specifically.
+No `.env.local` is needed: `next.config.ts` already defaults `API_ORIGIN` to
+`http://127.0.0.1:5001`. See "Troubleshooting" for why nothing of ours listens
+on :5000 on a Mac.
 
 ---
 
@@ -211,9 +214,9 @@ this compose file. See "Changing the API address needs a rebuild" above.
 
 | Variable     | Default  | Purpose                                                   |
 |--------------|----------|-----------------------------------------------------------|
-| PORT         | 5000     | TCP port Flask listens on. Also feeds the UI's API_ORIGIN |
+| PORT         | 5001     | TCP port Flask listens on. Also feeds the UI's API_ORIGIN |
 |              |          | build arg, so compose keeps the two in step.              |
-| WEB_PORT     | 8080     | TCP port the Next.js UI listens on — the one to browse to |
+| WEB_PORT     | 5000     | TCP port the Next.js UI listens on — the one to browse to |
 | STREAM_HOST  | (auto)   | LAN IP sent to Sonos as stream origin. Set this if your   |
 |              |          | server has multiple NICs and auto-detection picks the     |
 |              |          | wrong one (e.g. a management or VM bridge interface).     |
@@ -289,7 +292,7 @@ make up
 ```
 
 This one *is* a runtime variable, so a restart is enough — no rebuild. Check it
-took with `curl localhost:5000/api/health`, which echoes back the
+took with `curl localhost:5001/api/health`, which echoes back the
 `stream_host` it will hand to the speakers.
 
 ---
@@ -414,7 +417,7 @@ normally you should not need to: yt-dlp handles this itself.
 ## REST API
 
 ```bash
-SERVER=192.168.1.42:5000
+SERVER=192.168.1.42:5001
 
 # Discover speakers
 curl http://$SERVER/api/devices
@@ -469,13 +472,13 @@ curl -X POST http://$SERVER/api/stop \
 ## Firewall
 
 ```bash
-sudo firewall-cmd --permanent --add-port=8080/tcp   # UI, for browsers
-sudo firewall-cmd --permanent --add-port=5000/tcp   # API, for the speakers
+sudo firewall-cmd --permanent --add-port=5000/tcp   # UI, for browsers
+sudo firewall-cmd --permanent --add-port=5001/tcp   # API, for the speakers
 sudo firewall-cmd --reload
 ```
 
-Both are needed, and for genuinely different callers. 8080 is the UI you open.
-5000 is where the *speakers* fetch audio — the browser never touches it
+Both are needed, and for genuinely different callers. 5000 is the UI you open.
+5001 is where the *speakers* fetch audio — the browser never touches it
 directly, but leaving it closed means the UI works and playback silently
 never starts, because Sonos cannot reach the stream.
 
@@ -512,10 +515,10 @@ The `web` container mounts nothing, so it needs no labels.
 | Long gaps between tracks | Downloads aren't keeping up. Check `curl http://$SERVER/api/downloads` and the log for transcode errors, then raise DOWNLOAD_WORKERS. |
 | First song slow to start / stutters | The network is saturated. PREFETCH_GATE (on by default) should already give it the whole uplink; confirm with `/api/downloads` that only the seed is `running` while it downloads. |
 | Cache directory growing without bound | Eviction only runs while a station is active. Check the log for "Evicted" lines. |
-| Port 5000 in use | `PORT=5001 make up`, and rerun firewall-cmd. If an old Quadlet unit is still installed it is probably the squatter — see "Upgrading from the Quadlet install". |
-| "Scan error: 403 Forbidden" | Something else is answering on the API port. On macOS this is ControlCenter (AirPlay Receiver), which owns :5000 and 403s every path it doesn't know; `curl -i localhost:5000/api/health` showing `Server: AirTunes/…` confirms it. Move the backend to 5001 and point `API_ORIGIN` at it. |
+| Port 5000 or 5001 in use | `WEB_PORT=8080 make up` moves the UI, `PORT=5002 make up` moves the API, and rerun firewall-cmd for whichever moved. If an old Quadlet unit is still installed it is probably the squatter on 5000 — see "Upgrading from the Quadlet install". |
+| "Scan error: 403 Forbidden" | Something else is answering on the API port. The classic case is macOS ControlCenter (AirPlay Receiver), which owns :5000 and 403s every path it doesn't know — the reason the API sits on :5001 and not :5000. `curl -i localhost:5001/api/health` showing `Server: AirTunes/…` rather than Werkzeug confirms a squatter; move the backend with `PORT=` and rebuild so `API_ORIGIN` follows. |
 | UI loads but every action fails | The address baked into the `web` image doesn't match where the API is listening. `API_ORIGIN` is a *build* arg — setting it on the container does nothing. Rebuild: `docker compose up -d --build`. |
-| Browser at :5000 shows JSON, not the app | Working as intended — that is the API. The UI is on :8080. |
+| Browser at :5001 shows JSON, not the app | Working as intended — that is the API. The UI is on :5000. |
 | UI container exits with `EADDRINUSE` | Something else already holds WEB_PORT. `WEB_PORT=8081 make up`, and rerun firewall-cmd. |
 
 ---

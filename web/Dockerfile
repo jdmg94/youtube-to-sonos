@@ -32,9 +32,9 @@ FROM base AS builder
 # invisible: the app boots fine and every /api call 404s at whatever address was
 # baked. Change it here, and rebuild.
 #
-# The default matches the Containerfile's PORT=5000 and assumes host networking,
+# The default matches the Containerfile's PORT=5001 and assumes host networking,
 # where the backend really is on this container's own loopback.
-ARG API_ORIGIN=http://127.0.0.1:5000
+ARG API_ORIGIN=http://127.0.0.1:5001
 ENV API_ORIGIN=${API_ORIGIN}
 ENV NEXT_TELEMETRY_DISABLED=1
 
@@ -55,7 +55,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 # Matches docker-compose.yml's WEB_PORT default, so `docker run` on this image
 # alone lands where the compose deployment does. 3000 is avoided deliberately:
 # it is every Node dev server's default and the likeliest port to be taken.
-ENV PORT=8080
+ENV PORT=5000
 # Bind all interfaces. The standalone server defaults to localhost, which under
 # bridge networking answers only inside the container and looks like a dead port
 # from outside.
@@ -72,7 +72,7 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 USER nextjs
-EXPOSE 8080
+EXPOSE 5000
 
 # No curl in this image, and adding it just to poll a port is a package and a
 # CVE surface for something node already does. Checks the app itself, not the

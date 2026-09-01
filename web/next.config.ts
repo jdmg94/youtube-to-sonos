@@ -7,7 +7,7 @@ import type { NextConfig } from "next";
  * and what makes the app work unchanged behind a tunnel or reverse proxy,
  * where the backend's LAN IP would not be reachable from the browser at all.
  */
-const API_ORIGIN = process.env.API_ORIGIN ?? "http://127.0.0.1:5000";
+const API_ORIGIN = process.env.API_ORIGIN ?? "http://127.0.0.1:5001";
 
 const nextConfig: NextConfig = {
   // Self-contained server bundle for the Docker image.

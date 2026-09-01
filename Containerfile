@@ -39,8 +39,8 @@ ENV CACHE_DIR=/app/cache
 # image built from web/, and nothing here renders HTML.
 COPY app.py .
 
-EXPOSE 5000
+EXPOSE 5001
 
-ENV PORT=5000
+ENV PORT=5001
 
 CMD ["python3", "app.py"]

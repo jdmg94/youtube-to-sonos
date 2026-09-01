@@ -2,7 +2,7 @@
 # or `podman compose`).
 #
 # Two services: `youtube-sonos` is the Flask JSON API and media server, `web`
-# is the Next.js UI. Open the UI on :8080; :5000 is for the speakers and for
+# is the Next.js UI. Open the UI on :5000; :5001 is for the speakers and for
 # curl. Nothing but `web` should be reachable from a browser.
 #
 # Host networking is REQUIRED, for a different reason in each service.
@@ -37,7 +37,7 @@ services:
     # image: youtube-sonos-streamer
     network_mode: host
     environment:
-      PORT: ${PORT:-5000}
+      PORT: ${PORT:-5001}
       # Escape hatch for YouTube 403s: pick the player client yt-dlp asks.
       # Unset = yt-dlp's own default. e.g. "tv" or "default,-web".
       YTDLP_PLAYER_CLIENT: "${YTDLP_PLAYER_CLIENT:-}"
@@ -65,7 +65,7 @@ services:
     # look. curl is already in the image (the Containerfile fetches deno with
     # it), so this costs no package.
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${PORT:-5000}/api/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${PORT:-5001}/api/health"]
       interval: 30s
       timeout: 5s
       # yt-dlp and soco import slowly and cache_scan() walks the cache dir
@@ -93,13 +93,17 @@ services:
         #
         # Compose does not rebuild on `up` when only a build arg changed, so
         # changing either variable needs `up -d --build`.
-        API_ORIGIN: ${API_ORIGIN:-http://127.0.0.1:${PORT:-5000}}
+        API_ORIGIN: ${API_ORIGIN:-http://127.0.0.1:${PORT:-5001}}
     network_mode: host
     environment:
       # The UI's own port — this is the one to open in a browser. Not 3000:
       # that is Next's own default and the first port anything else on a shared
       # box takes, so the UI would lose the race and fail to bind.
-      PORT: ${WEB_PORT:-8080}
+      #
+      # 5000 is the UI's, deliberately: it is the address people already have
+      # bookmarked from when the API lived there, and the API — which no human
+      # opens — is the cheaper of the two to move. The backend went to 5001.
+      PORT: ${WEB_PORT:-5000}
     # Ordering only, not a guarantee: the UI is a client of the API like any
     # other and renders its own error states when it is down. Waiting for
     # healthy just avoids handing someone a "Scan error" banner during the

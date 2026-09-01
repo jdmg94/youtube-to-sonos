@@ -11,7 +11,7 @@ dist
 # `rewrites()` is evaluated during `next build` and the resolved destination is
 # written into .next/routes-manifest.json, so whatever API_ORIGIN is set at
 # build time is baked into the image permanently. A developer's .env.local
-# pointing at, say, 127.0.0.1:5001 to dodge the macOS AirPlay collision would
+# pointing at, say, 127.0.0.1:5002 for a second backend would
 # silently ship an image that talks to a port existing only on that laptop.
 # API_ORIGIN comes from the build arg in the Dockerfile and nowhere else.
 .env
