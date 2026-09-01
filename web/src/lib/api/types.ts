@@ -369,3 +369,160 @@ export interface StopResponse {
   status: "stopped";
   device: string;
 }
+
+// ---------------------------------------------------------------------------
+// /api/hue/*
+// ---------------------------------------------------------------------------
+
+/**
+ * Where a bridge was found. `mdns` is the LAN scan; `cloud` is
+ * discovery.meethue.com, only reached when mDNS finds nothing.
+ */
+export type HueDiscoverySource = "mdns" | "cloud";
+
+export interface HueBridge {
+  ip: string;
+  /** Bridge id. `null` from the mDNS record when it carries no `bridgeid`. */
+  id: string | null;
+  name: string | null;
+  source: HueDiscoverySource;
+}
+
+/**
+ * `[identity, ciphersuite]` — which DTLS-PSK pair completed a handshake.
+ *
+ * Discovered rather than configured, because the two reference implementations
+ * disagree about it. `null` until a stream has started once. Shown in the UI
+ * for the same reason the backend persists it: after a firmware update it is
+ * the first thing to look at.
+ */
+export type HuePskProfile = [identity: string, ciphersuite: string];
+
+/**
+ * Bridge and stream state. Touches no network, so it separates "not paired"
+ * from "bridge unreachable" without waiting out a scan — and it is therefore
+ * safe to poll.
+ */
+export interface HueHealth {
+  paired: boolean;
+  bridge_ip: string | null;
+  bridge_id: string | null;
+  psk_profile: HuePskProfile | null;
+  streaming: boolean;
+  /** Entertainment area id being streamed to, or `null`. */
+  area: string | null;
+  channels: number[];
+  /**
+   * Why a *previously running* stream died. Distinguishes a stream that
+   * dropped on its own from one that was never started — both report
+   * `streaming: false`.
+   */
+  error: string | null;
+}
+
+export interface HuePairResponse {
+  paired: true;
+  ip: string;
+  id: string | null;
+}
+
+export interface HueLight {
+  id: string;
+  name: string | null;
+  archetype: string | null;
+  on: boolean | null;
+  /** 0–100, as the bridge reports it. Not the same scale as `energy`. */
+  brightness: number | null;
+  /** The device this light service belongs to. */
+  owner: string | null;
+}
+
+/** Rooms and zones, merged — they have identical shape and `kind` is the label. */
+export interface HueGroup {
+  id: string;
+  kind: "room" | "zone";
+  name: string | null;
+  grouped_light: string | null;
+  children: string[];
+}
+
+/**
+ * An Entertainment configuration: the only thing that can be streamed to.
+ *
+ * An empty `channels` means no lights are assigned. The backend refuses to
+ * stream to one (409) because it would handshake, send, and show nothing.
+ */
+export interface HueArea {
+  id: string;
+  name: string | null;
+  status: string | null;
+  channels: number[];
+  /** channel id → `{x, y, z}` in the room. Unused today; the bridge's own map. */
+  positions: Record<string, unknown>;
+}
+
+/** `[r, g, b]`, each 0–255. Out-of-range components are clamped server-side. */
+export type Rgb = [r: number, g: number, b: number];
+
+export type HueStreamRequest =
+  | { action: "start"; area?: string }
+  | { action: "stop" }
+  /** A bare `Rgb` drives every channel; the map addresses them individually. */
+  | { action: "color"; color: Rgb | Record<string, Rgb> };
+
+export interface HueStreamStarted {
+  streaming: true;
+  area: string;
+  channels: number[];
+  psk_profile: HuePskProfile;
+}
+
+export interface HueStreamStopped {
+  streaming: false;
+}
+
+/** `color` answers `{streaming: true}` with no area — discriminate on the key. */
+export type HueStreamResponse =
+  | HueStreamStarted
+  | HueStreamStopped
+  | { streaming: true };
+
+/**
+ * Beat and timbre features for one track, from `analysis.py`.
+ *
+ * `energy` and `brightness` are parallel, both `0..1`, sampled every
+ * `frame_seconds`; `beats` are seconds from the start of the track. See
+ * `lib/hue.ts` for the palette that turns these into colours — deliberately not
+ * baked into the sidecar, so changing it costs a page reload rather than
+ * re-analysing every cached track.
+ */
+export interface HueAnalysis {
+  version: number;
+  /** Seconds. The analysed length, which is the decoded audio, not yt-dlp's. */
+  duration: number;
+  /** BPM, derived from `beats` rather than reported by librosa. */
+  tempo: number;
+  /** Seconds per `energy`/`brightness` sample. 0.1 today. */
+  frame_seconds: number;
+  beats: number[];
+  energy: number[];
+  brightness: number[];
+}
+
+/** 202: analysis is genuinely in flight. Poll. A 404 is final. */
+export interface HueAnalysisPending {
+  status: "pending";
+  queued: number;
+}
+
+/**
+ * Whether an `/api/hue/analysis` body is the features or the 202 placeholder.
+ *
+ * Needed because the client resolves both to a value: the 202 is not an error
+ * and must not be thrown, but it also is not something to render lights from.
+ */
+export function isAnalysisPending(
+  body: HueAnalysis | HueAnalysisPending,
+): body is HueAnalysisPending {
+  return "status" in body;
+}

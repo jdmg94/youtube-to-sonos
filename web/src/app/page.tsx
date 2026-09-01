@@ -3,6 +3,7 @@
 import { toast } from "sonner";
 
 import { AppHeader } from "@/components/app-header";
+import { HueDialog } from "@/components/hue-dialog";
 import { NowPlayingCard } from "@/components/now-playing";
 import { QueuePanel } from "@/components/queue-panel";
 import { SpeakerDialog } from "@/components/speaker-dialog";
@@ -69,6 +70,18 @@ export default function Home() {
             />
             <NowPlayingCard device={selected} nowPlaying={nowPlaying} station={station} />
             <VolumePanel device={selected} />
+            {/*
+             * Last in the panel, and below Now Playing rather than beside the
+             * speaker banner it resembles. On a phone this column is the top of
+             * the page, and a second always-present banner above the card would
+             * push the one thing people open the app to see further down the
+             * fold — for a feature most sessions never touch.
+             *
+             * Not gated on `selected`: the bridge is reachable whether or not a
+             * speaker has been chosen, and pairing it is worth doing before
+             * there is anything playing.
+             */}
+            <HueDialog nowPlaying={nowPlaying} />
           </section>
 
           {/*

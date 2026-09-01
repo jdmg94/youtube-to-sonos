@@ -11,9 +11,19 @@ import type {
   Device,
   Downloads,
   Health,
+  HueAnalysis,
+  HueAnalysisPending,
+  HueArea,
+  HueBridge,
+  HueGroup,
+  HueHealth,
+  HueLight,
+  HuePairResponse,
+  HueStreamResponse,
   NowPlaying,
   PlayRequest,
   PlayResponse,
+  Rgb,
   Station,
   StationRefreshResponse,
   StopResponse,
@@ -43,6 +53,22 @@ const PLAY_TIMEOUT_MS = 90_000;
 
 /** Discovery is an SSDP multicast scan; it is slow by nature. */
 const DISCOVERY_TIMEOUT_MS = 30_000;
+
+/**
+ * Starting the light stream does an HTTPS PUT to the bridge and then up to four
+ * DTLS handshakes while it works out which PSK profile this firmware wants.
+ * Only the first start pays for all four, but that is the one a user is
+ * watching, and timing out on it would abort a stream that is about to come up.
+ */
+const HUE_STREAM_TIMEOUT_MS = 45_000;
+
+/**
+ * A colour frame, unlike everything else here, has a deadline: it is one sample
+ * of a render loop running many times a second, and a frame that takes longer
+ * than this has already been superseded by the next one. Failing fast keeps a
+ * stalled backend from accumulating in-flight requests.
+ */
+const HUE_COLOR_TIMEOUT_MS = 2_000;
 
 /**
  * A failed API call. Carries the HTTP status and the yt-dlp failure flags so
@@ -252,4 +278,77 @@ export const api = {
   /** The SSE URL. Not fetched here — `useEvents` owns the EventSource. */
   eventsUrl: (deviceIp?: string) =>
     buildUrl("/api/events", { device_ip: deviceIp }),
+
+  // -- Philips Hue ---------------------------------------------------------
+
+  /** Bridge and stream state. Touches no network server-side, so polling is cheap. */
+  hueHealth: (signal?: AbortSignal) => request<HueHealth>("/api/hue/health", { signal }),
+
+  hueDiscover: (signal?: AbortSignal) =>
+    request<{ bridges: HueBridge[] }>("/api/hue/discover", {
+      // mDNS, then possibly a round trip to discovery.meethue.com.
+      timeoutMs: DISCOVERY_TIMEOUT_MS,
+      signal,
+    }),
+
+  /**
+   * One attempt at the link-button flow. Throws `ApiError(428)` until the
+   * button is pressed — which is a state to poll through, not a failure.
+   * `ip` may be omitted to re-pair with the stored bridge.
+   */
+  huePair: (ip?: string, signal?: AbortSignal) =>
+    request<HuePairResponse>("/api/hue/pair", { method: "POST", body: { ip }, signal }),
+
+  hueLights: (signal?: AbortSignal) =>
+    request<{ lights: HueLight[] }>("/api/hue/lights", { signal }),
+
+  hueGroups: (signal?: AbortSignal) =>
+    request<{ groups: HueGroup[] }>("/api/hue/groups", { signal }),
+
+  hueAreas: (signal?: AbortSignal) =>
+    request<{ areas: HueArea[] }>("/api/hue/areas", { signal }),
+
+  /**
+   * Beat and timbre features for a track.
+   *
+   * Resolves for a 202 as well as a 200 — analysis in flight is not an error —
+   * so callers must narrow with `isAnalysisPending` before reading `beats`. A
+   * 404 throws, and is final: nothing will ever analyse that track.
+   */
+  hueAnalysis: (videoId: string, signal?: AbortSignal) =>
+    request<HueAnalysis | HueAnalysisPending>(
+      `/api/hue/analysis/${encodeURIComponent(videoId)}`,
+      { signal },
+    ),
+
+  hueStartStream: (area?: string, signal?: AbortSignal) =>
+    request<HueStreamResponse>("/api/hue/stream", {
+      method: "POST",
+      body: { action: "start", area },
+      timeoutMs: HUE_STREAM_TIMEOUT_MS,
+      signal,
+    }),
+
+  hueStopStream: (signal?: AbortSignal) =>
+    request<HueStreamResponse>("/api/hue/stream", {
+      method: "POST",
+      body: { action: "stop" },
+      signal,
+    }),
+
+  /**
+   * Push one colour at the running stream. Separate from `hueStartStream` only
+   * for its timeout: this is the render loop's hot path.
+   *
+   * The backend's writer thread keeps resending whatever it last held at 25 Hz,
+   * so this is a *setpoint*, not a frame — dropping one costs nothing and the
+   * caller should never queue or retry them.
+   */
+  hueColor: (color: Rgb | Record<string, Rgb>, signal?: AbortSignal) =>
+    request<HueStreamResponse>("/api/hue/stream", {
+      method: "POST",
+      body: { action: "color", color },
+      timeoutMs: HUE_COLOR_TIMEOUT_MS,
+      signal,
+    }),
 };

@@ -6,14 +6,22 @@
  * not a check, so a backend that quietly renames a field type-checks perfectly
  * and fails at runtime. This is the thing that notices.
  *
- *   npm run check:contract                       # against the dev proxy
- *   API=http://127.0.0.1:5001 npm run check:contract   # straight at Flask
+ *   pnpm check:contract                          # against the dev proxy
+ *   NEXT_PUBLIC_API_BASE=http://127.0.0.1:5001 pnpm check:contract   # straight at Flask
  *
  * Needs a running backend, and a Sonos speaker for the speaker-bound half.
- * Read-only: it never plays, stops, or changes volume.
+ * Read-only: it never plays, stops, or changes volume — and on the Hue side it
+ * never pairs a bridge or starts a light stream, since the bridge allows only
+ * one and taking the slot would stop whatever is currently driving the room.
  */
 import { api, ApiError } from "../src/lib/api/client.ts";
-import type { CacheState, PlaybackState } from "../src/lib/api/types.ts";
+import { isAnalysisPending } from "../src/lib/api/types.ts";
+import type {
+  CacheState,
+  HueAnalysis,
+  HueAnalysisPending,
+  PlaybackState,
+} from "../src/lib/api/types.ts";
 
 let failures = 0;
 
@@ -28,6 +36,29 @@ function check(name: string, cond: boolean, detail = "") {
 
 const isNullOr = (v: unknown, t: string) => v === null || typeof v === t;
 const HMS = /^\d+:\d{2}:\d{2}$/;
+
+/**
+ * Run a group of checks, recording an unexpected throw as a failure instead of
+ * abandoning the run.
+ *
+ * Everything else here throws straight out to the harness handler, which is
+ * right for `health` and `devices` — nothing downstream means anything without
+ * them. The Hue sections are different: they sit in the middle of the script,
+ * they are the newest thing in it, and an older backend answers all of them
+ * with a 404. Without this, one missing endpoint reports as a harness crash and
+ * silently takes the station, now-playing, volume and SSE checks with it — the
+ * script says nothing about the parts that were working fine.
+ */
+async function section(run: () => Promise<void>) {
+  try {
+    await run();
+  } catch (e) {
+    const detail = e instanceof ApiError && e.status === 404
+      ? `${e.message} — is the backend older than this feature?`
+      : String(e);
+    check("section completed", false, detail);
+  }
+}
 
 const CACHE_STATES: CacheState[] = ["done", "running", "queued", "failed", "missing"];
 const PLAYBACK_STATES: PlaybackState[] = [
@@ -89,6 +120,9 @@ async function main() {
     check("unknown /api/ path returns JSON 404, not HTML", isJson404, String(e));
   }
 
+  console.log(`\n# hue`);
+  await section(checkHue);
+
   const ip = process.env.DEVICE_IP ?? devices[0]?.ip;
   if (!ip) {
     console.log("\n! no speaker discovered — skipping speaker-bound checks");
@@ -110,6 +144,9 @@ async function main() {
   check("duration is seconds|null", st.tracks.every((t) => isNullOr(t.duration, "number")));
   check("title is string|null", st.tracks.every((t) => isNullOr(t.title, "string")));
   console.log(`  ->    ${st.tracks.length} track(s), cursor at ${st.index}`);
+
+  console.log(`\n# hue analysis`);
+  await section(() => checkAnalysis(st.tracks.find((t) => t.cached === "done")?.id ?? null));
 
   console.log(`\n# now-playing (${ip})`);
   const np = await api.nowPlaying(ip);
@@ -134,6 +171,188 @@ async function main() {
   console.log(`\n# events (SSE)`);
   await checkFirstEventFrame(ip);
 }
+
+/**
+ * The bridge half of the Hue contract.
+ *
+ * Never starts or stops a stream: the bridge permits exactly one, so a check
+ * that started one would take the slot from whatever is actually playing the
+ * lights, and a check that stopped one would turn the room off. Health is free
+ * — it touches no network — and the rest is a read against a bridge on the LAN.
+ */
+async function checkHue() {
+  const h = await api.hueHealth();
+  check("paired is boolean", typeof h.paired === "boolean");
+  check("bridge_ip is string|null", isNullOr(h.bridge_ip, "string"));
+  check("bridge_id is string|null", isNullOr(h.bridge_id, "string"));
+  check("streaming is boolean", typeof h.streaming === "boolean");
+  check("area is string|null", isNullOr(h.area, "string"));
+  check("error is string|null", isNullOr(h.error, "string"));
+  check("channels is number[]", isNumberArray(h.channels));
+  check(
+    "psk_profile is [identity, ciphersuite]|null",
+    h.psk_profile === null ||
+      (Array.isArray(h.psk_profile) &&
+        h.psk_profile.length === 2 &&
+        h.psk_profile.every((s) => typeof s === "string")),
+    JSON.stringify(h.psk_profile),
+  );
+  // Never: it is the shared secret for the light stream and the UI has no use
+  // for it, so it leaking into the payload is a security regression, not a
+  // typing one.
+  check("clientkey is never echoed", !("clientkey" in h));
+  console.log(
+    `  ->    paired=${h.paired} bridge=${h.bridge_ip ?? "none"} ` +
+      `streaming=${h.streaming} psk=${h.psk_profile?.join(" / ") ?? "not yet known"}`,
+  );
+
+  if (!h.paired) {
+    /*
+     * Discovery is the only Hue surface an unpaired backend has, and it is the
+     * entire input to the pairing UI — so it is checked exactly when there is
+     * nothing else to check. It costs a 5s mDNS sweep plus a possible round
+     * trip to Philips, which is why a paired setup skips it.
+     */
+    console.log("  ->    not paired; scanning instead (mDNS, ~5s)");
+    const { bridges } = await api.hueDiscover();
+    check("bridges is an array", Array.isArray(bridges));
+    check("bridge ip is string", bridges.every((b) => typeof b.ip === "string"));
+    check("bridge id is string|null", bridges.every((b) => isNullOr(b.id, "string")));
+    check("bridge name is string|null", bridges.every((b) => isNullOr(b.name, "string")));
+    check(
+      "source is mdns|cloud",
+      bridges.every((b) => b.source === "mdns" || b.source === "cloud"),
+      bridges.map((b) => b.source).join(","),
+    );
+    console.log(`  ->    ${bridges.map((b) => `${b.ip}(${b.source})`).join(", ") || "none"}`);
+    return;
+  }
+
+  const { areas } = await api.hueAreas();
+  check("areas is an array", Array.isArray(areas));
+  check("area id is string", areas.every((a) => typeof a.id === "string"));
+  check("area name is string|null", areas.every((a) => isNullOr(a.name, "string")));
+  check("area status is string|null", areas.every((a) => isNullOr(a.status, "string")));
+  check("area channels is number[]", areas.every((a) => isNumberArray(a.channels)));
+  check(
+    "area positions is an object map",
+    areas.every((a) => !!a.positions && typeof a.positions === "object"),
+  );
+  console.log(
+    `  ->    ${areas.length} area(s): ` +
+      `${areas.map((a) => `${a.name}[${a.channels.length}]`).join(", ") || "none"}`,
+  );
+
+  const { lights } = await api.hueLights();
+  check("lights is an array", Array.isArray(lights));
+  check("light id is string", lights.every((l) => typeof l.id === "string"));
+  check("light name is string|null", lights.every((l) => isNullOr(l.name, "string")));
+  check("light archetype is string|null", lights.every((l) => isNullOr(l.archetype, "string")));
+  check("light owner is string|null", lights.every((l) => isNullOr(l.owner, "string")));
+  check("light on is boolean|null", lights.every((l) => isNullOr(l.on, "boolean")));
+  check("light brightness is number|null", lights.every((l) => isNullOr(l.brightness, "number")));
+  // The bridge reports brightness as a percentage. A 0-255 value here would
+  // type-check and render as a full bar on every lamp.
+  check(
+    "brightness is 0-100, not 0-255",
+    lights.every((l) => l.brightness === null || (l.brightness >= 0 && l.brightness <= 100)),
+  );
+
+  const { groups } = await api.hueGroups();
+  check("groups is an array", Array.isArray(groups));
+  check("group id is string", groups.every((g) => typeof g.id === "string"));
+  check("group name is string|null", groups.every((g) => isNullOr(g.name, "string")));
+  check(
+    "group kind is room|zone",
+    groups.every((g) => g.kind === "room" || g.kind === "zone"),
+    groups.map((g) => g.kind).join(","),
+  );
+  check(
+    "group grouped_light is string|null",
+    groups.every((g) => isNullOr(g.grouped_light, "string")),
+  );
+  check(
+    "group children is string[]",
+    groups.every((g) => Array.isArray(g.children) && g.children.every((c) => typeof c === "string")),
+  );
+  console.log(`  ->    ${lights.length} light(s), ${groups.length} group(s)`);
+}
+
+/**
+ * The analysis sidecar the render loop parses.
+ *
+ * All three answers are contractual, so none of them is a failure: 200 with
+ * features, 202 while a capture is being analysed, and 404 for a track cached
+ * with `HUE_ANALYZE` off — which is every track downloaded before the bridge
+ * was paired. Only a *fourth* answer, or a 200 that does not fit `HueAnalysis`,
+ * is a break.
+ */
+async function checkAnalysis(videoId: string | null) {
+  if (!videoId) {
+    console.log("  ->    no fully-cached track to ask about — skipped");
+    return;
+  }
+
+  let body: HueAnalysis | HueAnalysisPending;
+  try {
+    body = await api.hueAnalysis(videoId);
+  } catch (e) {
+    check(
+      "analysis answers 200, 202 or 404",
+      e instanceof ApiError && e.status === 404,
+      String(e),
+    );
+    if (e instanceof ApiError && e.status === 404) {
+      console.log(`  ->    ${videoId}: not analysed, and none scheduled`);
+    }
+    return;
+  }
+
+  if (isAnalysisPending(body)) {
+    check("pending carries a numeric queue depth", typeof body.queued === "number");
+    console.log(`  ->    ${videoId}: analysing, ${body.queued} queued`);
+    return;
+  }
+
+  check("version is number", typeof body.version === "number");
+  check("duration is number", typeof body.duration === "number");
+  check("tempo is number", typeof body.tempo === "number");
+  check("frame_seconds is number", typeof body.frame_seconds === "number");
+  check("beats is number[]", isNumberArray(body.beats));
+  check("energy is number[]", isNumberArray(body.energy));
+  check("brightness is number[]", isNumberArray(body.brightness));
+  // `createRenderer` indexes the two together off one frame number. Different
+  // lengths would read past the end of the shorter one and render `undefined`
+  // as a colour component for the rest of the track.
+  check(
+    "energy and brightness are parallel",
+    body.energy.length === body.brightness.length,
+    `${body.energy.length} vs ${body.brightness.length}`,
+  );
+  check(
+    "envelopes span the track",
+    Math.abs(body.energy.length * body.frame_seconds - body.duration) < 1,
+    `${body.energy.length} frames x ${body.frame_seconds}s vs ${body.duration}s`,
+  );
+  check("beats are in seconds and ascending", isAscending(body.beats));
+  check(
+    "beats land inside the track",
+    body.beats.every((b) => b >= 0 && b <= body.duration + 1),
+  );
+  check(
+    "energy and brightness are 0-1",
+    [...body.energy, ...body.brightness].every((v) => v >= 0 && v <= 1),
+  );
+  console.log(
+    `  ->    ${videoId}: v${body.version}, ${body.duration.toFixed(0)}s, ` +
+      `${body.tempo.toFixed(1)} bpm, ${body.beats.length} beats, ${body.energy.length} frames`,
+  );
+}
+
+const isNumberArray = (v: unknown): v is number[] =>
+  Array.isArray(v) && v.every((n) => typeof n === "number" && Number.isFinite(n));
+
+const isAscending = (xs: number[]) => xs.every((x, i) => i === 0 || x > xs[i - 1]);
 
 /** There is no client method for a bogus path — that is the point of the test. */
 async function fetchUnknownEndpoint() {
