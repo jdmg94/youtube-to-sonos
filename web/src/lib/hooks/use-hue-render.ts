@@ -385,8 +385,16 @@ export function useHueRender({
 
       if (showing && nowMs - lastPreviewMs >= PREVIEW_INTERVAL_MS) {
         lastPreviewMs = nowMs;
+        /*
+         * Keyed off what the frame *is*, exactly as the payload below is —
+         * never off `room.length`. Knowing the channels does not mean
+         * addressing them: with an area chosen and no analysis yet, the loop
+         * still sends the idle colour to the room as a whole, and a strip built
+         * from the channel ids would be a row of `undefined` for the comparison
+         * on the next tick to die reading `[0]` off.
+         */
         const strip =
-          room.length > 0 ? room.map((id) => next[String(id)]) : [next[WHOLE_ROOM]];
+          WHOLE_ROOM in next ? [next[WHOLE_ROOM]] : room.map((id) => next[String(id)]);
         // Compared before storing: a held colour would otherwise re-render the
         // page four times a second to say nothing changed.
         setColors((prev) =>

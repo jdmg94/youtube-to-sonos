@@ -39,9 +39,12 @@ export function volumeIcon(volume: number, muted: boolean): VolumeIcon {
 /**
  * The one-tap levels.
  *
- * Not a uniform ramp: 10 and 25 are the two the original bothered to separate,
- * because the useful resolution is all at the quiet end — the difference
- * between 10 and 25 is a conversation you can still have, and the difference
- * between 75 and 100 is not.
+ * Not a uniform ramp: the steps widen as they climb (10, 10, 20, 20), because
+ * the useful resolution is all at the quiet end — 25 to 35 is a real change in
+ * a room, and 65 to 85 is barely one.
+ *
+ * Neither end of the scale is offered. Zero would duplicate the mute button
+ * sitting next to these, and 100 is not something to put one tap away — the
+ * drag it takes to reach is the confirmation.
  */
 export const VOLUME_PRESETS: readonly number[] = [25, 35, 45, 65, 85];

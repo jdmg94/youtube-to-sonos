@@ -472,6 +472,22 @@ describe("useHueRender: the swatch", () => {
     assert.equal(state.colors?.length, 3);
   });
 
+  it("shows one swatch while an area is chosen but nothing is rendering", async () => {
+    /*
+     * Knowing the channels does not mean addressing them. With no analysis the
+     * loop still sends the idle colour to the room as a whole, so a strip built
+     * from the channel ids is a row of `undefined` — and the next tick compares
+     * against it and reads `[0]` off nothing.
+     *
+     * Two ticks past the preview interval, deliberately: the first publish
+     * stores the bad strip and the second is what dies on it.
+     */
+    analysisReply = { status: 404, body: { error: "Not analysed" } };
+    render({ preview: true, area: area(3) });
+    await advance(ticks(10));
+    assert.deepEqual(state.colors, [IDLE_COLOR]);
+  });
+
   it("goes dark when the stream stops", async () => {
     // The loop stops with the stream, so the last colour it computed would
     // otherwise sit there as a live readout of a bridge nothing is driving.

@@ -43,9 +43,28 @@ describe("volumeIcon", () => {
 
 describe("VOLUME_PRESETS", () => {
   it("puts its resolution at the quiet end", () => {
-    // Not a uniform ramp, deliberately: the difference between 10 and 25 is a
-    // conversation you can still have, and 75 to 100 is not.
-    assert.deepEqual([...VOLUME_PRESETS], [10, 25, 50, 75, 100]);
+    // Not a uniform ramp, deliberately: 25 to 35 is a real change in a room
+    // and 65 to 85 is barely one, so the steps widen as they climb.
+    //
+    // Neither end of the scale is here. Zero would duplicate the mute button
+    // sitting next to it, and 100 is not something to put one tap away — the
+    // drag it takes to reach is the confirmation.
+    assert.deepEqual([...VOLUME_PRESETS], [25, 35, 45, 65, 85]);
+  });
+
+  it("climbs, in steps that widen as it gets louder", () => {
+    // The shape, asserted separately from the literal above: retuning the
+    // numbers is a judgement call, but a preset that goes backwards or that
+    // spends its resolution at the loud end is a mistake in either case.
+    const gaps = VOLUME_PRESETS.slice(1).map((level, i) => level - VOLUME_PRESETS[i]);
+    assert.ok(
+      gaps.every((gap) => gap > 0),
+      `not ascending: ${VOLUME_PRESETS.join(", ")}`,
+    );
+    assert.ok(
+      gaps.every((gap, i) => i === 0 || gap >= gaps[i - 1]),
+      `steps narrow as they climb: ${gaps.join(", ")}`,
+    );
   });
 
   it("only offers levels the speaker will accept", () => {
