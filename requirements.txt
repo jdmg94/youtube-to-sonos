@@ -1,3 +1,10 @@
 Flask>=3.0.0
 soco>=0.30.0
 yt-dlp[default]>=2024.0.0
+# Philips Hue. python-mbedtls is the DTLS-PSK client for the Entertainment
+# stream; its wheels stop at cp312, which is what pins this app to Python 3.12
+# (Fedora 40's own version — see Containerfile). Prebuilt wheels exist for
+# macosx arm64, manylinux x86_64 and musllinux; a linux/arm64 host has to build
+# from sdist and needs mbedtls headers.
+python-mbedtls>=2.10.1,<3
+zeroconf>=0.148.0

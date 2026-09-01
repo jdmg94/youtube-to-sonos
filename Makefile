@@ -72,13 +72,19 @@ run:
 		-v ./cookies.txt:/app/cookies.txt:ro,z \
 		-v ./cache:/app/cache:z $(IMAGE_NAME)
 
-# Local dev backend. 5001 works on macOS too: ControlCenter (AirPlay Receiver)
-# owns :5000 and answers every path with a bare 403, which used to surface in
-# the UI as "Scan error: 403 Forbidden" and look like a broken backend — the
-# reason the backend does not sit on 5000 anymore. `pnpm dev` serves the UI on
-# :3000 there, so nothing of ours wants :5000 on a Mac.
+# Local dev backend. On macOS pass PORT=5001: ControlCenter (AirPlay Receiver)
+# owns :5000 and answers every path with a bare 403, which surfaces in the UI as
+# "Scan error: 403 Forbidden" and looks like a broken backend. Point the UI at
+# the same port via API_ORIGIN in web/.env.local.
+#
+# --python is not optional. python-mbedtls (Hue's DTLS-PSK stream) ships no
+# wheel past cp312, so a bare `uv venv` picking up a newer interpreter installs
+# nothing usable and fails at import. 3.12 is also what the Fedora 40 image
+# runs, so local and container agree. uv downloads it if the host lacks it.
+PYTHON_VERSION ?= 3.12
+
 run-local:
-	uv venv && . .venv/bin/activate && uv pip install -r requirements.txt && PORT=$(PORT) python app.py
+	uv venv --python $(PYTHON_VERSION) && . .venv/bin/activate && uv pip install -r requirements.txt && PORT=$(PORT) python app.py
 
 
 # --- UI dev ------------------------------------------------------------------
