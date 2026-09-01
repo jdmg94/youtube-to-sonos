@@ -34,6 +34,13 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   themeColor: "#0b0f19",
+  /*
+   * Lets the page draw under the notch and the home indicator, which is what
+   * makes `env(safe-area-inset-bottom)` report anything but 0. The tab bar and
+   * the speaker sheet both budget for it: without this they would be laid out
+   * as if the indicator were not there and then have it drawn over them.
+   */
+  viewportFit: "cover",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
@@ -44,13 +51,23 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     >
       {/*
        * Above 900px the app is locked to the viewport and its panels scroll
-       * internally — the bento layout only reads as one instrument panel if it
-       * fits on screen. Below that there is no room for that trick, so the lock
-       * is lifted and the page scrolls normally.
+       * internally — the two-column layout only reads as one instrument panel if
+       * it fits on screen. Below that the page scrolls normally and ends behind
+       * a fixed tab bar, so it has to reserve that bar's height at the bottom or
+       * the last row of whichever tab is open is unreachable.
        */}
-      <body className="flex min-h-full flex-col items-center min-[901px]:h-screen min-[901px]:overflow-hidden">
+      <body className="flex min-h-full flex-col items-center max-[900px]:pb-[calc(var(--tab-bar)+env(safe-area-inset-bottom))] min-[901px]:h-screen min-[901px]:overflow-hidden">
         {children}
-        <Toaster position="bottom-right" />
+        {/*
+         * `mobileOffset` covers sonner's own 600px breakpoint and `offset` the
+         * rest; both read the same responsive token, so the toast clears the tab
+         * bar at every width the bar exists at. See `--toast-bottom`.
+         */}
+        <Toaster
+          position="bottom-right"
+          offset={{ bottom: "var(--toast-bottom)" }}
+          mobileOffset={{ bottom: "var(--toast-bottom)", left: "16px", right: "16px" }}
+        />
       </body>
     </html>
   );

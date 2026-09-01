@@ -74,7 +74,41 @@ export function SpeakerDialog({
         <ChevronDown aria-hidden className="ml-auto size-3.5 shrink-0 text-muted-foreground" />
       </DialogTrigger>
 
-      <DialogContent className="max-h-[80vh] gap-0 min-[601px]:max-h-[85vh]">
+      {/*
+       * A bottom sheet on a phone, the centred modal it already was above
+       * 900px. Both are the same element: the phone styles are passed as base
+       * classes so `cn`'s merge drops the ones they replace (`top-1/2`,
+       * `left-1/2`, the two translates, `max-w`), and the desktop layout is put
+       * back under `min-[901px]:`, which Tailwind emits after the unprefixed
+       * utility it is undoing.
+       *
+       * `rounded-none rounded-t-3xl` rather than `rounded-t-3xl` alone: the base
+       * `rounded-3xl` is the *shorthand*, so leaving it in place would keep the
+       * bottom corners round on an edge that is off-screen.
+       */}
+      <DialogContent
+        className={cn(
+          "inset-x-0 top-auto bottom-0 max-h-[85vh] max-w-none translate-x-0 translate-y-0 sm:max-w-none",
+          "gap-0 rounded-none rounded-t-3xl px-5 pt-3",
+          // The sheet's own bottom edge is the screen's, so its padding is the
+          // only thing between the last speaker and the home indicator.
+          "pb-[calc(1.25rem+env(safe-area-inset-bottom))]",
+          "data-open:slide-in-from-bottom data-closed:slide-out-to-bottom",
+
+          "min-[901px]:top-1/2 min-[901px]:bottom-auto min-[901px]:left-1/2 min-[901px]:max-w-[460px]",
+          "min-[901px]:-translate-x-1/2 min-[901px]:-translate-y-1/2 min-[901px]:rounded-b-3xl",
+          "min-[901px]:px-6 min-[901px]:pt-6 min-[901px]:pb-6",
+          "min-[901px]:data-open:slide-in-from-bottom-4 min-[901px]:data-closed:slide-out-to-bottom-4",
+        )}
+      >
+        {/* The affordance that says "drag me down", on the one layout where
+            that gesture is what people will try first. It is decoration —
+            dismissing still happens through the close button or the scrim. */}
+        <span
+          aria-hidden
+          className="mx-auto mb-3 h-1 w-9 shrink-0 rounded-full bg-white/20 min-[901px]:hidden"
+        />
+
         <DialogHeader className="mb-4 shrink-0 flex-row items-center justify-between gap-2 space-y-0">
           <DialogTitle className="flex items-center gap-2 font-display text-[1.15rem] font-semibold">
             <Disc3 aria-hidden className="size-5 text-gold" />

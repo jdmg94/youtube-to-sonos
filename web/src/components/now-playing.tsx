@@ -3,6 +3,7 @@
 import { Loader2, SkipBack, SkipForward, Square } from "lucide-react";
 import { toast } from "sonner";
 
+import { Equalizer } from "@/components/equalizer";
 import { api } from "@/lib/api/client";
 import type { Device, NowPlaying, StationBody } from "@/lib/api/types";
 import { useAction } from "@/lib/hooks/use-action";
@@ -114,31 +115,6 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
         />
       </div>
     </div>
-  );
-}
-
-/**
- * Animation delays, in source order. Not a uniform ramp: 0.25s and 0.5s put
- * bars 2 and 3 a third and two thirds through an 0.8s cycle, and the fourth is
- * pulled back to 0.15s so the row never reads as a wave travelling left to
- * right.
- */
-const EQ_DELAYS = ["0s", "0.25s", "0.5s", "0.15s"];
-
-function Equalizer({ live }: { live: boolean }) {
-  return (
-    <span aria-hidden className="flex h-[18px] w-[25px] items-end gap-[3px]">
-      {EQ_DELAYS.map((delay) => (
-        <span
-          key={delay}
-          style={{ animationDelay: delay }}
-          className={cn(
-            "w-[3px] rounded-[1.5px]",
-            live ? "h-full animate-eq-bounce bg-ok" : "h-[55%] bg-muted-foreground",
-          )}
-        />
-      ))}
-    </span>
   );
 }
 

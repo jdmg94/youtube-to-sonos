@@ -1,17 +1,8 @@
 "use client";
 
-import { ChevronDown, Lightbulb, Loader2, Radio, RotateCw, Router } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Lightbulb, Loader2, Radar, Radio, RotateCw, Router } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
 import { Slider } from "@/components/ui/slider";
 import type { HueArea, HueBridge, NowPlaying, Rgb } from "@/lib/api/types";
 import { describeArea, describeBridge, describeHue, type HueTone } from "@/lib/hue-bridge";
@@ -21,35 +12,51 @@ import { useHueRender, type AnalysisStatus } from "@/lib/hooks/use-hue-render";
 import { useHueSettings, type HueSettingsState } from "@/lib/hooks/use-hue-settings";
 import { cn } from "@/lib/utils";
 
-export interface HueDialogProps {
+export interface LightsPanelProps {
   /** The track the speaker is on. The only thing the render loop reads. */
   nowPlaying: NowPlaying | null;
 }
 
 /**
- * The Hue banner, and everything behind it: pairing, picking an area, and
+ * Philips Hue: pairing, picking an entertainment area, the three dials, and
  * starting the lights.
  *
- * ## Why the hooks live here and not in the page
+ * ## Why this is a panel and not a dialog
  *
- * `useHue` and `useHueRender` are mounted by this component even though the
- * lights must keep following the music with the dialog shut — which they do,
- * because it is the *trigger* that is always mounted and only `DialogContent`
- * that unmounts on close. Hoisting them to `page.tsx` would move state to a
- * place nothing else reads, and the one thing that genuinely varies with the
- * dialog — whether anybody can see the colour swatch — is `open`, which is
- * local. So `open` is passed down as `preview` and the loop skips publishing to
- * React entirely while nobody is looking.
+ * It was a dialog, because the desktop sidebar had no room for a fourth card.
+ * The tabbed shell gives it one: on a phone it is the Lights tab, and above
+ * 900px it is a section in the sidebar column. Everything below is the dialog's
+ * body, unchanged in behaviour — the pieces it hid behind `DialogContent` are
+ * now always mounted.
+ *
+ * That difference is an improvement rather than a cost. The dialog kept the
+ * render loop alive by mounting `useHue` and `useHueRender` on the *trigger*,
+ * which stayed rendered while only the content unmounted — a subtlety a reader
+ * had to be told about. Here there is nothing to unmount: the shell hides
+ * off-tab panels with CSS precisely so state like this survives a tab switch.
+ *
+ * ## Two deliberate deviations from the dialog
+ *
+ * `preview` is always on, where the dialog passed `open`. There is no longer a
+ * moment when nobody can see the swatch strip on desktop, and the 4 Hz publish
+ * that drives it re-renders this subtree only — `useHueRender` is mounted here,
+ * so the queue and the stream form above it are untouched. Deriving a real
+ * answer would mean a `matchMedia` hook, which is new machinery, an SSR
+ * hydration risk, and a saving of a few spans.
+ *
+ * Scanning is a button, where the dialog scanned on open. A panel has no "open"
+ * to hang it on, and the only alternative — scanning on mount — is an mDNS
+ * sweep plus a possible round trip to Philips on every page load, for the
+ * majority of sessions that have no bridge and never look at this tab.
  */
-export function HueDialog({ nowPlaying }: HueDialogProps) {
-  const [open, setOpen] = useState(false);
+export function LightsPanel({ nowPlaying }: LightsPanelProps) {
   const hue = useHue();
   const dials = useHueSettings();
 
   const { status, colors } = useHueRender({
     nowPlaying,
     streaming: hue.streaming,
-    preview: open,
+    preview: true,
     // The area, not just its id: the loop lays the gradient out along the
     // channel list and whatever positions the bridge knows for them.
     area: hue.area,
@@ -58,92 +65,75 @@ export function HueDialog({ nowPlaying }: HueDialogProps) {
   });
 
   // Only the stream errors toast. `hue.error` is a health or scan failure,
-  // which the banner already states and which repeats on every refresh while a
-  // bridge reboots; `pairError` is shown inside the dialog because that is
-  // where the user is standing when it happens, and because it is instructions
-  // rather than an alert.
+  // which the header already states and which repeats on every refresh while a
+  // bridge reboots; `pairError` is shown in place because that is where the
+  // user is looking when it happens, and because it is instructions rather
+  // than an alert.
   useErrorToast(hue.streamError);
 
-  const view = describeHue(hue.health, hue.loading, hue.area?.name);
-
-  /*
-   * Scan as soon as the dialog opens on an unpaired bridge.
-   *
-   * Pairing is done once, ever, and it is the only path into the whole
-   * feature — so an empty list behind a Scan button spends the user's first
-   * impression on a click that has exactly one sensible answer. Gated on
-   * `paired` because a scan is an mDNS sweep plus a possible round trip to
-   * Philips, and there is nothing for it to tell someone already set up.
-   */
   const paired = hue.health?.paired ?? false;
-  const { discover } = hue;
-  useEffect(() => {
-    if (!open || paired) return;
-    discover();
-  }, [open, paired, discover]);
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger
-        aria-haspopup="dialog"
-        title="Hue lights"
-        className={cn(
-          "flex w-full cursor-pointer items-center gap-2.5 rounded-xl border px-4 py-2.5 text-left text-[0.9rem] transition-[background-color,border-color] duration-200",
-          TRIGGER_TONE[view.tone],
-        )}
-      >
-        <Lightbulb aria-hidden className={cn("size-4 shrink-0", ICON_TONE[view.tone])} />
-        <span className="min-w-0 truncate">
-          <span
-            className={cn(
-              "font-semibold",
-              view.tone === "loading" || view.tone === "setup"
-                ? "text-muted-foreground"
-                : "text-foreground",
-            )}
-          >
-            {view.label}
-          </span>
-          {view.detail && (
-            <span className="text-muted-foreground"> · {view.detail}</span>
+    <div className="flex min-h-0 flex-col gap-2.5">
+      <StatusHeader hue={hue} paired={paired} />
+
+      {paired ? (
+        <>
+          <AreaList hue={hue} />
+          <LightSettings dials={dials} />
+          <StreamControls hue={hue} status={status} colors={colors} />
+        </>
+      ) : (
+        <BridgeList hue={hue} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * What the bridge is doing, and the one control that is useful in every state.
+ *
+ * The dialog put this on its trigger, where a `ChevronDown` promised the rest
+ * of the panel was behind it. Here the rest of the panel is directly below, so
+ * it is a heading rather than a button — but the wording and the tone treatment
+ * are the trigger's, because `describeHue` is what decides both.
+ */
+function StatusHeader({ hue, paired }: { hue: HueState; paired: boolean }) {
+  const view = describeHue(hue.health, hue.loading, hue.area?.name);
+
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-2.5 rounded-xl border px-4 py-2.5 text-[0.9rem] transition-[background-color,border-color] duration-200",
+        HEADER_TONE[view.tone],
+      )}
+    >
+      <Lightbulb aria-hidden className={cn("size-4 shrink-0", ICON_TONE[view.tone])} />
+      <span className="min-w-0 truncate">
+        <span
+          className={cn(
+            "font-semibold",
+            view.tone === "loading" || view.tone === "setup"
+              ? "text-muted-foreground"
+              : "text-foreground",
           )}
+        >
+          {view.label}
         </span>
-        <ChevronDown aria-hidden className="ml-auto size-3.5 shrink-0 text-muted-foreground" />
-      </DialogTrigger>
-
-      <DialogContent className="max-h-[80vh] gap-0 min-[601px]:max-h-[85vh]">
-        <DialogHeader className="mb-4 shrink-0 flex-row items-center justify-between gap-2 space-y-0">
-          <DialogTitle className="flex items-center gap-2 font-display text-[1.15rem] font-semibold">
-            <Lightbulb aria-hidden className="size-5 text-gold" />
-            Hue lights
-          </DialogTitle>
-          {/* Sits left of the dialog's own close button, which is absolutely
-              positioned in the top-right corner. */}
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            onClick={paired ? hue.refresh : hue.discover}
-            disabled={hue.scanning || hue.pairing}
-            aria-label={paired ? "Re-read bridge status" : "Scan for bridges"}
-            title={paired ? "Re-read bridge status" : "Scan for bridges"}
-            className="mr-8 rounded-full text-muted-foreground"
-          >
-            <RotateCw className={cn((hue.scanning || hue.loading) && "animate-spin")} />
-          </Button>
-        </DialogHeader>
-
-        <DialogDescription className="sr-only">
-          Pair a Philips Hue bridge and choose which entertainment area follows the music.
-        </DialogDescription>
-
-        <div className="thin-scrollbar flex min-h-0 flex-col gap-2.5 overflow-y-auto pr-1.5">
-          {paired ? <AreaList hue={hue} /> : <BridgeList hue={hue} />}
-          {paired && <LightSettings dials={dials} />}
-        </div>
-
-        {paired && <StreamControls hue={hue} status={status} colors={colors} />}
-      </DialogContent>
-    </Dialog>
+        {view.detail && <span className="text-muted-foreground"> · {view.detail}</span>}
+      </span>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        onClick={paired ? hue.refresh : hue.discover}
+        disabled={hue.scanning || hue.pairing}
+        aria-label={paired ? "Re-read bridge status" : "Scan for bridges"}
+        title={paired ? "Re-read bridge status" : "Scan for bridges"}
+        className="ml-auto shrink-0 rounded-full text-muted-foreground"
+      >
+        <RotateCw className={cn((hue.scanning || hue.loading) && "animate-spin")} />
+      </Button>
+    </div>
   );
 }
 
@@ -190,10 +180,21 @@ function BridgeList({ hue }: { hue: HueState }) {
           Looking for a Hue bridge…
         </Empty>
       ) : (
-        <Empty>
-          No Hue bridge found. Check that it is powered on and on the same LAN
-          subnet as this server.
-        </Empty>
+        <div className="flex flex-col items-center gap-3 px-4 py-6 text-center">
+          <p className="max-w-[36ch] text-[0.9rem] text-muted-foreground">
+            Pair a Hue bridge to let the lights follow what&rsquo;s playing. It
+            has to be powered on and on the same LAN subnet as this server.
+          </p>
+          {/* The panel's replacement for the dialog's scan-on-open — see the
+              note on `LightsPanel`. It is the branch above that keeps a second
+              press from starting a second LAN sweep: a scan in flight renders
+              the spinner instead of this block, so there is no button to press
+              rather than a disabled one to wonder about. */}
+          <Button variant="outline" size="sm" onClick={hue.discover}>
+            <Radar aria-hidden />
+            Scan for bridges
+          </Button>
+        </div>
       )}
     </>
   );
@@ -422,7 +423,7 @@ function StreamControls({
   const ready = hue.area ? describeArea(hue.area, hue.health).ready : false;
 
   return (
-    <div className="mt-4 flex shrink-0 items-center gap-3 border-t border-border pt-4">
+    <div className="mt-1.5 flex shrink-0 items-center gap-3 border-t border-border pt-4">
       <SwatchStrip colors={colors} streaming={hue.streaming} />
 
       <span className="min-w-0 flex-1 truncate text-[0.82rem] text-muted-foreground">
@@ -518,13 +519,16 @@ function Empty({
  * and the label already distinguishes idle from running. `setup` stays neutral
  * on purpose — it is an invitation, not a warning, and a page with an untouched
  * Hue section should not look like it has a problem.
+ *
+ * No hover states, unlike the dialog trigger these came from: this is a
+ * heading now, and nothing about it is clickable except the refresh button.
  */
-const TRIGGER_TONE: Record<HueTone, string> = {
+const HEADER_TONE: Record<HueTone, string> = {
   loading: "border-border bg-white/[0.03]",
-  setup: "border-border bg-white/[0.03] hover:bg-white/[0.06]",
-  ready: "border-gold/20 bg-gold/[0.06] hover:border-gold/35 hover:bg-gold/[0.12]",
-  live: "border-gold/20 bg-gold/[0.06] hover:border-gold/35 hover:bg-gold/[0.12]",
-  error: "border-[#f87171]/25 bg-[#f87171]/[0.06] hover:bg-[#f87171]/[0.12]",
+  setup: "border-border bg-white/[0.03]",
+  ready: "border-gold/20 bg-gold/[0.06]",
+  live: "border-gold/20 bg-gold/[0.06]",
+  error: "border-[#f87171]/25 bg-[#f87171]/[0.06]",
 };
 
 const ICON_TONE: Record<HueTone, string> = {
