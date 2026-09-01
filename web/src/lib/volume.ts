@@ -44,4 +44,4 @@ export function volumeIcon(volume: number, muted: boolean): VolumeIcon {
  * between 10 and 25 is a conversation you can still have, and the difference
  * between 75 and 100 is not.
  */
-export const VOLUME_PRESETS: readonly number[] = [10, 25, 50, 75, 100];
+export const VOLUME_PRESETS: readonly number[] = [25, 35, 45, 65, 85];

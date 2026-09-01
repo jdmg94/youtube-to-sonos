@@ -57,6 +57,7 @@ export default function Home() {
          */}
         <div className="thin-scrollbar flex min-h-0 flex-col gap-4 min-[601px]:gap-6 min-[901px]:overflow-y-auto">
           <section className="glass-panel flex shrink-0 flex-col gap-4 p-5">
+            <HueDialog nowPlaying={nowPlaying} />
             <SpeakerDialog
               devices={devices}
               loading={loading}
@@ -81,7 +82,6 @@ export default function Home() {
              * speaker has been chosen, and pairing it is worth doing before
              * there is anything playing.
              */}
-            <HueDialog nowPlaying={nowPlaying} />
           </section>
 
           {/*
