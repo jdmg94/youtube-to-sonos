@@ -58,7 +58,7 @@ Docker Desktop on macOS cannot do any of this: its host networking is a VM-side 
 
 ## Architecture
 
-The backend is one file, `app.py`. The frontend lives in `web/src`, with all decision logic in `web/src/lib` (pure, unit-tested) and React components kept thin over it.
+The backend is `app.py` plus `hue.py` (Philips Hue — the one subsystem big enough and self-contained enough to earn its own module; it never imports `app.py`). The frontend lives in `web/src`, with all decision logic in `web/src/lib` (pure, unit-tested) and React components kept thin over it.
 
 `API.md` is the contract between them.
 
@@ -169,6 +169,22 @@ Because each queue item is a real tagged file, `_now_playing_payload` reads titl
 
 `soco.discover()` uses SSDP multicast, which is why the container must run with `--network=host` (multicast doesn't cross network namespaces). `STREAM_HOST` env var overrides auto-detected LAN IP when the host has multiple NICs — Sonos must be able to reach this IP to pull the stream.
 
+### Philips Hue (`hue.py`)
+
+Lights that follow the music. Discovery (mDNS `_hue._tcp.local`, cloud fallback), link-button pairing, CLIP v2 REST, and the Entertainment stream — DTLS-PSK over UDP 2100. `app.py` owns the HTTP surface at `/api/hue/*`; `hue.py` never imports it, taking `set_state_path()` at startup instead so it can't drift from `CACHE_DIR`.
+
+**It lives in Flask, not Next, and that is not arbitrary.** The colours come from analysis of audio this process already decoded, and `/api/:path*` is rewritten to Flask in `beforeFiles` — a handler at `web/src/app/api/hue/*` would build, typecheck and lint clean, then 404 through the proxy at runtime.
+
+**Python 3.12 is forced, not chosen.** `python-mbedtls` (the DTLS-PSK client) ships no wheel past cp312 and librosa 1.0 needs ≥3.12, so 3.12 is the exact intersection — which is why `run-local` passes `--python`, and why a bare `uv venv` grabbing a newer interpreter installs something that fails at import. There is also **no linux/arm64 wheel** for python-mbedtls; an ARM host builds from sdist and needs mbedtls headers.
+
+**The PSK identity is discovered, not hardcoded.** The two reference implementations disagree about what a bridge wants — `hue-sync` sends the application key with AES-128, `hue-entertainment-pykit` sends the `hue-application-id` with AES-256 — and both are in production use, so one of them is riding a leniency. `HueSession` tries `PSK_PROFILES` in order and persists the winner to `hue.json`, making the answer a cached fact rather than a constant we could get wrong. A firmware change costs one extra handshake instead of a bug report. `spike_hue_dtls.py` answers the same question interactively and is deletable once it has.
+
+Two things worth not re-deriving: the writer thread **always sends** rather than sending on change, because the bridge drops a stream idle for ~10s and this makes keepalive fall out of the frame loop for free; and a frame is **one datagram carrying every channel** at full 16-bit colour, where pykit sends one datagram per light and hue-sync duplicates each 8-bit value into both bytes.
+
+`/api/hue/health` deliberately does **not** take `_HUE_LOCK` — starting a stream holds it across an HTTPS PUT and up to four DTLS handshakes, and health blocking behind that would stall the UI exactly while it asks whether the stream came up.
+
+`hue.json` sits in `CACHE_DIR` at mode `0600` and is safe there: `cache_scan` only touches `.part`/`.tmp`/`.mp3` and `_evict` only `.mp3`.
+
 ### Other endpoints
 
 `/` (JSON index — the frontend moved to `web/`, and this says so rather than 404ing a stale bookmark of the old UI), `/api/health` (liveness + config, touches no network), `/api/devices` (SSDP scan), `/api/downloads` (scheduler introspection), `/api/info` (metadata only), `/api/play` (`mode`: `auto`/`now`/`next`), `/api/transport` (POST: next/prev/play/pause/seek/jump against the speaker's own queue), `/api/station` (ordered list + cursor + per-track cache status), `/api/station/refresh` (POST: discard everything queued after the playing track and refill it with unheard songs — the UI's Refresh button), `/api/stop` (also tears down the station so it stops prefetching), `/api/volume` (GET/POST), `/media/<id>.jpg` (album art — Sonos won't fetch YouTube's CDN). Most endpoints fall back to the first discovered speaker when `device_ip` is omitted. Queue and transport commands always go through `_coordinator()`, since they must target the group coordinator.
@@ -177,7 +193,7 @@ Because each queue item is a real tagged file, `_now_playing_payload` reads titl
 
 ### Cache layout
 
-`CACHE_DIR` (default `/app/cache`, must be a persistent writable mount) holds `<id>.mp3`, `<id>.json` (metadata sidecar) and `<id>.jpg`. Sidecars and artwork are never evicted — they're tiny, and keeping them means a re-listen needs only the audio. `cache_scan()` at startup deletes stray `.part` files and backfills missing sidecars.
+`CACHE_DIR` (default `/app/cache`, must be a persistent writable mount) holds `<id>.mp3`, `<id>.json` (metadata sidecar) and `<id>.jpg`. Sidecars and artwork are never evicted — they're tiny, and keeping them means a re-listen needs only the audio. `cache_scan()` at startup deletes stray `.part` files and backfills missing sidecars. It also holds `hue.json` (Hue credentials, `0600`) — not audio, but it belongs to the same persistent mount, and it survives because both `cache_scan` and `_evict` match on suffix rather than deleting what they don't recognise.
 
 ### Container layering
 

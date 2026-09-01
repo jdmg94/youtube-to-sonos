@@ -408,6 +408,129 @@ YouTube. Not a pause — use `POST /api/transport` with `pause` for that.
 
 ---
 
+# Philips Hue
+
+Lights that follow the music. These live on the Flask side rather than as Next
+route handlers for two reasons: the colours come from analysis of audio *this*
+process already decoded, and `/api/:path*` is rewritten to Flask in
+`beforeFiles`, so a handler at `web/src/app/api/hue/*` would build, typecheck
+and lint clean and then 404 through the proxy at runtime.
+
+Credentials live in `CACHE_DIR/hue.json`, mode `0600`. The client key in it is
+the shared secret for the light stream — anyone holding it can drive the
+lights — so **no endpoint ever returns it.**
+
+Design notes: `docs/superpowers/specs/2026-08-31-hue-support-design.md`.
+
+## `GET /api/hue/health`
+
+```json
+{"paired": true, "bridge_ip": "10.0.0.5", "bridge_id": "001788fffe...",
+ "psk_profile": ["username", "TLS-PSK-WITH-AES-128-GCM-SHA256"],
+ "streaming": true, "area": "<uuid>", "channels": [0, 1, 2], "error": null}
+```
+
+Like `/api/health`, **touches no network** — a client must be able to tell
+"not paired" from "bridge unreachable" without waiting out a scan. Always 200.
+
+`psk_profile` is which DTLS identity/ciphersuite pair actually completed a
+handshake, cached from the last successful start (see `/api/hue/stream`). It is
+surfaced because when handshakes start failing after a firmware update it is
+the first thing to look at, and it is otherwise buried in the log.
+
+`error` is the reason a *previously running* stream died, which is how a stream
+that dropped on its own is distinguished from one never started.
+
+## `GET /api/hue/discover`
+
+`{"bridges": [{"ip": "10.0.0.5", "id": "001788...", "name": null, "source": "mdns"}]}`
+
+mDNS (`_hue._tcp.local`) first, `https://discovery.meethue.com/` as a fallback
+— the cloud endpoint needs internet access and tells a third party's NAT about
+your bridge, so it is only reached when mDNS finds nothing. mDNS needs
+`network_mode: host` for the same reason SSDP does.
+
+Returns `{"bridges": []}` rather than an error when both sources come up empty.
+
+## `POST /api/hue/pair`
+
+`{"ip": "10.0.0.5"}` → `{"paired": true, "ip": "...", "id": "..."}`
+
+`ip` may be omitted to re-pair with the stored bridge.
+
+**428** the link button has not been pressed yet. This is not an error — it is
+the several seconds the user spends walking to the bridge. **Poll through it.**
+
+**400** no ip given and none stored. **502** bridge unreachable, or it paired
+but returned no client key (a firmware too old for the Entertainment stream —
+the message says so, since otherwise this surfaces much later as a DTLS
+handshake that never works).
+
+## `GET /api/hue/lights`
+
+`{"lights": [{"id", "name", "archetype", "on", "brightness", "owner"}]}`
+
+## `GET /api/hue/groups`
+
+`{"groups": [{"id", "kind": "room"|"zone", "name", "grouped_light", "children"}]}`
+
+Rooms and zones are separate CLIP v2 resource types with identical shape, and a
+UI has no reason to care which is which beyond a label, so they are merged here
+rather than making every caller fetch both.
+
+## `GET /api/hue/areas`
+
+`{"areas": [{"id", "name", "status", "channels": [0,1], "positions": {...}}]}`
+
+Entertainment configurations — the only thing that can be streamed to. If this
+is empty the user has to create one in the Hue app; nothing here can do it for
+them.
+
+All three: **409** not paired. **401** the bridge rejected our application key
+(pair again). **502** unreachable.
+
+## `POST /api/hue/stream`
+
+```
+{"action": "start", "area": "<id>"}   → {"streaming": true, "area", "channels", "psk_profile"}
+{"action": "stop"}                    → {"streaming": false}
+{"action": "color", "color": [r,g,b]} → {"streaming": true}
+```
+
+`action` defaults to `start`; `area` defaults to the first one. `color` also
+accepts a per-channel map, `{"0": [255,0,0], "1": [0,0,255]}` — JSON object
+keys are strings, and they are parsed as channel ids.
+
+Colour components out of range are **clamped**: a render loop overshooting to
+260 wants the brightest red, not a failed frame. A malformed colour is a
+**400**, not a clamp.
+
+Starting opens a DTLS-PSK session on UDP 2100 and a writer thread that sends
+one datagram per frame at 25 Hz carrying every channel. The writer *always*
+sends the current colour rather than sending on change — the bridge drops a
+stream idle for ~10s, and this makes keepalive fall out for free instead of
+being a second thing to get right.
+
+The DTLS identity and ciphersuite are **discovered, not hardcoded.** The two
+reference implementations disagree — `hue-sync` sends the application key with
+AES-128, `hue-entertainment-pykit` sends the `hue-application-id` with AES-256,
+and both are in production use — so the first start tries the combinations in
+order and persists the winner to `hue.json`. Later starts are a single attempt.
+A firmware change that invalidates the cached profile therefore costs one extra
+handshake rather than a bug report.
+
+Only one stream exists per process, because the bridge permits exactly one.
+Starting on the area already running is a no-op; starting on a different one
+tears the first down first.
+
+**409** not paired, no entertainment area exists, the chosen area has no lights
+assigned (which would otherwise handshake, stream, and show nothing — a success
+indistinguishable from broken hardware), or `color` with no stream running.
+**404** no such area. **400** unknown action, missing `color`, or a malformed
+one. **502** every PSK profile failed to handshake.
+
+---
+
 ## Media endpoints — not for the browser
 
 ### `GET|HEAD /media/<video_id>.mp3`

@@ -21,6 +21,7 @@ import soco
 import soco.exceptions
 from soco.data_structures import DidlMusicTrack, DidlResource
 import yt_dlp
+import hue
 
 # Configure logging
 logging.basicConfig(
@@ -2607,6 +2608,189 @@ def set_volume():
     except Exception as e:
         logger.error(f"Set volume failed: {e}")
         return jsonify({"error": str(e)}), 500
+
+# --- Philips Hue -------------------------------------------------------------
+#
+# These live here, in Flask, rather than as Next route handlers, for two
+# reasons. The colours are driven by analysis of the audio *this* process has
+# already decoded, and putting the DTLS stream behind an HTTP hop would add
+# latency to the one path where latency is the entire product. And `/api/:path*`
+# is rewritten to this server in `beforeFiles`, so a handler at
+# web/src/app/api/hue/* would build, typecheck and lint clean, then 404 through
+# the proxy at runtime.
+#
+# See docs/superpowers/specs/2026-08-31-hue-support-design.md.
+
+hue.set_state_path(os.path.join(CACHE_DIR, 'hue.json'))
+
+# One live stream per process. The bridge allows a single Entertainment stream
+# at a time anyway, so a registry keyed by area would only let us build a state
+# the hardware rejects.
+_HUE_SESSION = None
+_HUE_LOCK = threading.Lock()
+
+
+def _hue_error(e):
+    """Map a HueError onto its own status; anything else is a 500."""
+    if isinstance(e, hue.HueError):
+        return jsonify({"error": str(e)}), e.status
+    logger.exception("Hue request failed")
+    return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/hue/health', methods=['GET'])
+def hue_health():
+    """Paired? streaming? which area? Touches no network, for the same reason
+    /api/health doesn't: a frontend must be able to tell "not paired" from
+    "bridge unreachable" without waiting out a scan."""
+    state = hue.load_state()
+    # Deliberately *not* under _HUE_LOCK. Starting a stream holds that lock
+    # across an HTTPS PUT and up to four DTLS handshakes — tens of seconds —
+    # and health blocking behind it would stall the UI at precisely the moment
+    # it is asking "did the stream come up?". Reading a module global is atomic
+    # and _HUE_SESSION only ever holds None or a fully started session, so
+    # there is no half-built object to observe.
+    session = _HUE_SESSION
+    return jsonify({
+        "paired": hue.is_paired(),
+        "bridge_ip": state.get('ip'),
+        "bridge_id": state.get('id'),
+        # Which PSK profile actually worked. Worth surfacing: when handshakes
+        # start failing after a firmware update this is the first thing to look
+        # at, and it is otherwise buried in the log.
+        "psk_profile": state.get('psk_profile'),
+        "streaming": bool(session and session.is_active()),
+        "area": session.area_id if session else None,
+        "channels": session.channels if session else [],
+        "error": session.error if session else None,
+    })
+
+
+@app.route('/api/hue/discover', methods=['GET'])
+def hue_discover():
+    try:
+        return jsonify({"bridges": hue.discover()})
+    except Exception as e:
+        return _hue_error(e)
+
+
+@app.route('/api/hue/pair', methods=['POST'])
+def hue_pair():
+    """One attempt at the link-button flow.
+
+    Answers 428 while the button has not been pressed, which is a state the
+    client should poll through rather than an error — it is the several seconds
+    the user spends walking over to the bridge.
+    """
+    data = request.get_json(silent=True) or {}
+    ip = data.get('ip') or hue.load_state().get('ip')
+    if not ip:
+        return jsonify({"error": "No bridge ip given and none stored"}), 400
+    try:
+        state = hue.pair(ip)
+    except Exception as e:
+        return _hue_error(e)
+    # Never echo the client key: it is the shared secret for the light stream,
+    # and the UI has no use for it.
+    return jsonify({"paired": True, "ip": state.get('ip'),
+                    "id": state.get('id')})
+
+
+@app.route('/api/hue/lights', methods=['GET'])
+def hue_lights():
+    try:
+        return jsonify({"lights": hue.BridgeClient.from_state().lights()})
+    except Exception as e:
+        return _hue_error(e)
+
+
+@app.route('/api/hue/groups', methods=['GET'])
+def hue_groups():
+    try:
+        return jsonify({"groups": hue.BridgeClient.from_state().groups()})
+    except Exception as e:
+        return _hue_error(e)
+
+
+@app.route('/api/hue/areas', methods=['GET'])
+def hue_areas():
+    try:
+        return jsonify({"areas": hue.BridgeClient.from_state().areas()})
+    except Exception as e:
+        return _hue_error(e)
+
+
+@app.route('/api/hue/stream', methods=['POST'])
+def hue_stream():
+    """Start or stop the light stream, or push a colour at a running one.
+
+    {"action": "start", "area": "<id>"} | {"action": "stop"}
+              | {"action": "color", "color": [r, g, b]}
+    """
+    global _HUE_SESSION
+    data = request.get_json(silent=True) or {}
+    action = (data.get('action') or 'start').lower()
+
+    try:
+        with _HUE_LOCK:
+            if action == 'stop':
+                if _HUE_SESSION is not None:
+                    _HUE_SESSION.stop()
+                    _HUE_SESSION = None
+                return jsonify({"streaming": False})
+
+            if action == 'color':
+                if _HUE_SESSION is None or not _HUE_SESSION.is_active():
+                    return jsonify({"error": "Not streaming"}), 409
+                # Absent rather than defaulted to black: a body that misspells
+                # the key would otherwise blank the lights and report success,
+                # which reads as "the stream is broken" rather than "you sent
+                # the wrong field".
+                if 'color' not in data:
+                    return jsonify({"error": "Missing 'color'"}), 400
+                _HUE_SESSION.set_color(data['color'])
+                return jsonify({"streaming": True})
+
+            if action != 'start':
+                return jsonify({"error": f"Unknown action {action!r}"}), 400
+
+            client = hue.BridgeClient.from_state()
+            areas = client.areas()
+            if not areas:
+                return jsonify({"error": "No entertainment area on this "
+                                         "bridge. Create one in the Hue "
+                                         "app."}), 409
+            area_id = data.get('area') or areas[0]['id']
+            area = next((a for a in areas if a['id'] == area_id), None)
+            if area is None:
+                return jsonify({"error": f"No such entertainment area "
+                                         f"{area_id!r}"}), 404
+            # An area with no channels handshakes, streams, and shows nothing —
+            # a success that looks exactly like broken hardware. Say so instead.
+            if not area['channels']:
+                return jsonify({"error": f"Entertainment area "
+                                         f"{area.get('name') or area_id!r} has "
+                                         f"no lights assigned to it"}), 409
+
+            # Restarting on the same area is a no-op; switching areas must tear
+            # the old stream down first, because the bridge permits exactly one.
+            if _HUE_SESSION is not None:
+                if (_HUE_SESSION.area_id == area_id
+                        and _HUE_SESSION.is_active()):
+                    return jsonify({"streaming": True, "area": area_id,
+                                    "channels": _HUE_SESSION.channels,
+                                    "psk_profile": _HUE_SESSION.profile})
+                _HUE_SESSION.stop()
+                _HUE_SESSION = None
+
+            session = hue.HueSession(client, area_id, area['channels'])
+            session.start()
+            _HUE_SESSION = session
+            return jsonify({"streaming": True, "area": area_id,
+                            "channels": session.channels,
+                            "psk_profile": session.profile})
+    except Exception as e:
+        return _hue_error(e)
 
 # --- Serving cached media to Sonos -------------------------------------------
 
