@@ -22,6 +22,7 @@ import soco.exceptions
 from soco.data_structures import DidlMusicTrack, DidlResource
 import yt_dlp
 import hue
+import analysis
 
 # Configure logging
 logging.basicConfig(
@@ -423,6 +424,9 @@ RECENT_TTL = float(os.environ.get('RECENT_TTL', 12 * 3600))
 CACHE_DIR = os.environ.get('CACHE_DIR') or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'cache')
 CACHE_BITRATE = os.environ.get('CACHE_BITRATE', '192k')
+# Whether to capture PCM during transcode for the Hue beat analysis.
+# 'auto' (default) = on iff a bridge is paired; '1'/'0' force it either way.
+ANALYZE_MODE = os.environ.get('HUE_ANALYZE', 'auto').strip().lower()
 # Sliding window of cached audio around the current track: anything outside
 # current-WINDOW_BEHIND .. current+WINDOW_AHEAD is deleted.
 WINDOW_BEHIND = int(os.environ.get('WINDOW_BEHIND', 8))
@@ -1006,7 +1010,7 @@ def _fetch_thumbnail(video_id, url):
     return None
 
 
-def _ffmpeg_cmd(out_path, meta, art_path):
+def _ffmpeg_cmd(out_path, meta, art_path, pcm_path=None):
     """ffmpeg command that transcodes the audio on stdin into a tagged mp3.
 
     ffmpeg deliberately does NOT fetch from googlevideo. It could, when YouTube
@@ -1020,6 +1024,13 @@ def _ffmpeg_cmd(out_path, meta, art_path):
 
     Writes ID3v2 tags (and cover art when we have it) so Sonos can read the
     track's title/artist straight out of the file it pulls from us.
+
+    `pcm_path` adds a second output carrying raw mono PCM, for the Hue beat
+    analysis. It rides this transcode rather than getting its own pass because
+    ffmpeg is already decoding every frame — the extra output costs one more
+    encode of already-decoded audio, where a separate pass over the finished
+    mp3 would be a whole second decode. Omitted (and so costing nothing) when
+    no Hue bridge is paired.
     """
     cmd = ['ffmpeg', '-y', '-loglevel', 'error', '-i', 'pipe:0']
     if art_path:
@@ -1039,6 +1050,12 @@ def _ffmpeg_cmd(out_path, meta, art_path):
         '-metadata', 'album=YouTube Radio',
         out_path,
     ]
+    if pcm_path:
+        # A second output, so it must carry its own -map: ffmpeg applies -map
+        # to the output that follows it, and the mp3's maps above are already
+        # spent. Appended last so that nothing here can reorder or reinterpret
+        # the mp3's arguments, which are the ones playback depends on.
+        cmd += analysis.pcm_output_args(pcm_path)
     return cmd
 
 
@@ -1080,18 +1097,22 @@ def _drain(proc, sink):
     return t
 
 
-def _run_transcode(download, video_id, out_path, meta, art_path):
+def _run_transcode(download, video_id, out_path, meta, art_path, pcm_path=None):
     """yt-dlp streams the source into ffmpeg, which transcodes it to `out_path`.
 
     Returns (ok, error). Watchdogged on two axes; the stall timer is the
     important one, because a wedged fetch produces no bytes at all and would
     otherwise pin a download worker forever — and, with the prefetch gate, hold
     every other download off the wire with it.
+
+    The watchdog still measures `out_path`, the mp3, even when a PCM side
+    output is attached: progress means bytes the speaker can play, and the PCM
+    is a by-product nothing waits on.
     """
     source = subprocess.Popen(_ytdlp_source_cmd(video_id),
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
-        proc = subprocess.Popen(_ffmpeg_cmd(out_path, meta, art_path),
+        proc = subprocess.Popen(_ffmpeg_cmd(out_path, meta, art_path, pcm_path),
                                 stdin=source.stdout, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.PIPE)
     except Exception:
@@ -1154,6 +1175,32 @@ def _run_transcode(download, video_id, out_path, meta, art_path):
     return True, ''
 
 
+def _analysis_pcm_path(video_id):
+    """Where this track's PCM should go, or None to not capture it at all.
+
+    `auto` (the default) means "on iff a Hue bridge is paired". Capturing costs
+    ~2.6 MB of disk per minute of audio plus a librosa pass per track, and a
+    deployment with no lights in it should pay neither — but one *with* lights
+    should not have to find and set an env var to make the feature work.
+
+    Re-analysis is skipped when a current sidecar already exists, so a track
+    that falls out of the audio window and is re-downloaded does not re-run
+    analysis that is still on disk (sidecars are never evicted).
+    """
+    if ANALYZE_MODE in ('0', 'false', 'no', 'off'):
+        return None
+    # Checked even when forced on: HUE_ANALYZE=1 is a request, not a promise
+    # that the dependency got installed, and capturing PCM nothing can read
+    # would fill the disk one worker failure at a time.
+    if not analysis.available():
+        return None
+    if ANALYZE_MODE == 'auto' and not hue.is_paired():
+        return None
+    if analysis.load(CACHE_DIR, video_id) is not None:
+        return None
+    return analysis.analysis_paths(CACHE_DIR, video_id)[0]
+
+
 def _download_attempts(download, video_id):
     """Resolve and transcode one track, retrying where a retry can help."""
     mp3, part, _, _ = cache_paths(video_id)
@@ -1190,18 +1237,25 @@ def _download_attempts(download, video_id):
             continue
 
         art_path = _fetch_thumbnail(video_id, meta.get('thumbnail'))
-        ok, err = _run_transcode(download, video_id, part, meta, art_path)
+        pcm = _analysis_pcm_path(video_id)
+        ok, err = _run_transcode(download, video_id, part, meta, art_path, pcm)
         if ok and os.path.exists(part) and os.path.getsize(part) > 0:
             size = os.path.getsize(part)
             os.replace(part, mp3)
             _write_sidecar(video_id, meta, size)
             logger.info(f"Cached {video_id} ({size // 1024} KiB) — {meta.get('title')}")
+            # After the track is committed, and never in a way that can fail it.
+            # Analysis is for the lights; the speaker does not wait on it.
+            if pcm:
+                analysis.submit(CACHE_DIR, video_id)
             download.finish('done', meta=meta)
             return
 
         last_error = err or 'download produced no output'
         logger.error(f"Transcode failed for {video_id} (attempt {attempt}): {last_error}")
         _unlink(part)
+        if pcm:
+            _unlink(pcm)
 
         if _is_forbidden_error(last_error):
             # A 403 now means yt-dlp itself could not fetch the stream, which a
@@ -2718,6 +2772,52 @@ def hue_areas():
         return jsonify({"areas": hue.BridgeClient.from_state().areas()})
     except Exception as e:
         return _hue_error(e)
+
+
+@app.route('/api/hue/analysis/<video_id>', methods=['GET'])
+def hue_analysis(video_id):
+    """Beat and timbre features for a cached track, for the render loop.
+
+    Features, not colours: the palette belongs in the frontend where it is
+    cheap to change and unit testable. Baking colours into the sidecar would
+    mean re-analysing every cached track to adjust one.
+
+    202 only when analysis is genuinely in flight — a PCM capture on disk, or a
+    download still running that will produce one. "Cached" is deliberately not
+    enough: a track cached before the bridge was paired, or with HUE_ANALYZE
+    off, will never be analysed, and answering 202 for it would have the client
+    poll forever for something nobody is working on. That case is a 404 saying
+    so, which terminates.
+    """
+    if not valid_video_id(video_id):
+        return jsonify({"error": "Invalid video id"}), 400
+    data = analysis.load(CACHE_DIR, video_id)
+    if data is not None:
+        return jsonify(data)
+
+    pcm = analysis.analysis_paths(CACHE_DIR, video_id)[0]
+    if os.path.exists(pcm):
+        return jsonify({"status": "pending",
+                        "queued": analysis.pending()}), 202
+
+    # A running download only implies analysis if this deployment would
+    # actually capture it. Without the gate, a download with librosa missing —
+    # or the bridge unpaired — answers 202 for as long as it runs and the
+    # client polls something nobody will ever do.
+    with _STATE_LOCK:
+        downloading = _is_active(_DOWNLOADS.get(video_id))
+    if downloading and _analysis_pcm_path(video_id) is not None:
+        return jsonify({"status": "pending",
+                        "queued": analysis.pending()}), 202
+
+    # _analysis_pcm_path also returns None once a sidecar exists, so a sidecar
+    # landing between the load above and here would read as "never scheduled".
+    # Re-check before answering 404, which a client is entitled to treat as
+    # final. Only on this path, so it costs nothing in the common cases.
+    data = analysis.load(CACHE_DIR, video_id)
+    if data is not None:
+        return jsonify(data)
+    return jsonify({"error": "Not analysed, and none is scheduled"}), 404
 
 
 @app.route('/api/hue/stream', methods=['POST'])

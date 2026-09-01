@@ -58,7 +58,7 @@ Docker Desktop on macOS cannot do any of this: its host networking is a VM-side 
 
 ## Architecture
 
-The backend is `app.py` plus `hue.py` (Philips Hue — the one subsystem big enough and self-contained enough to earn its own module; it never imports `app.py`). The frontend lives in `web/src`, with all decision logic in `web/src/lib` (pure, unit-tested) and React components kept thin over it.
+The backend is `app.py` plus two Hue modules: `hue.py` (bridge discovery, pairing, the Entertainment stream) and `analysis.py` (beat and timbre extraction). Neither imports `app.py` — paths and policy are passed in — which is what keeps them testable without standing up Flask. Anything added here must also be listed in the Containerfile's `COPY`; it is not a package, so a forgotten module builds clean and dies at startup. The frontend lives in `web/src`, with all decision logic in `web/src/lib` (pure, unit-tested) and React components kept thin over it.
 
 `API.md` is the contract between them.
 
@@ -183,6 +183,18 @@ Two things worth not re-deriving: the writer thread **always sends** rather than
 
 `/api/hue/health` deliberately does **not** take `_HUE_LOCK` — starting a stream holds it across an HTTPS PUT and up to four DTLS handshakes, and health blocking behind that would stall the UI exactly while it asks whether the stream came up.
 
+### Beat analysis (`analysis.py`)
+
+What the lights actually follow. `_ffmpeg_cmd` grows a **second output** writing raw mono PCM (22050 Hz, librosa's own default rate) beside the mp3, and `analysis.py` turns that into an `<id>.beats.json` sidecar served by `/api/hue/analysis/<id>`.
+
+**It rides the transcode instead of getting its own pass.** ffmpeg is already decoding every frame to make the mp3, so a second output costs one more encode of already-decoded audio where a separate pass over the finished file would be a whole second decode. The PCM is headerless — a container would need a seekable output to finalise its header, and this is a pipe-fed transcode the stall watchdog may kill partway through, where headerless PCM truncates harmlessly. It is named `<id>.pcm.part` so the existing startup `*.part` sweep cleans up after a crash without knowing this feature exists.
+
+**It does not run on the download scheduler, and the design doc that said it should was wrong.** That scheduler's `PREFETCH_GATE` reasons about *the wire*; librosa is CPU-bound. An analysis job there would occupy a download worker — starving the downloads it shares a pool with — under a gate that means nothing for it. So: one dedicated worker (librosa is already internally parallel), a bounded queue, and `submit()` **drops** rather than blocks when full, because it is called from a download worker and blocking that stalls the pipeline feeding the speaker. Analysis is submitted only *after* the track is committed and can never fail a download.
+
+**The sidecar carries features, not colours** — energy, brightness, beat times. The palette belongs in the frontend where it is cheap to change and unit testable; baking colours in would mean re-analysing every cached track to adjust a constant. `tempo` is derived from the beat list we publish rather than taken from librosa, whose scalar is quantised onto its estimator's grid and can disagree with its own beats (117.45 against beats 119.99 BPM apart). `_tempo_from_beats` uses the **median to select** which intervals are one beat long and the **mean of those to measure**: beat times are snapped to librosa's 23.2ms frame grid, so a plain median returns a quantised value while a plain mean is hostage to a single missed beat.
+
+Capture is gated by `HUE_ANALYZE` — `auto` (default: on iff a bridge is paired), `1`, `0` — and by `analysis.available()`, since **librosa is optional at runtime**. It drags in numba, llvmlite and scipy; without it nothing is captured and only the lights go dark. That is also why `/api/hue/analysis` answers **404 when no analysis is scheduled** rather than 202: a track cached before pairing will never be analysed, and 202 would have a client poll forever.
+
 `hue.json` sits in `CACHE_DIR` at mode `0600` and is safe there: `cache_scan` only touches `.part`/`.tmp`/`.mp3` and `_evict` only `.mp3`.
 
 ### Other endpoints
@@ -193,7 +205,7 @@ Two things worth not re-deriving: the writer thread **always sends** rather than
 
 ### Cache layout
 
-`CACHE_DIR` (default `/app/cache`, must be a persistent writable mount) holds `<id>.mp3`, `<id>.json` (metadata sidecar) and `<id>.jpg`. Sidecars and artwork are never evicted — they're tiny, and keeping them means a re-listen needs only the audio. `cache_scan()` at startup deletes stray `.part` files and backfills missing sidecars. It also holds `hue.json` (Hue credentials, `0600`) — not audio, but it belongs to the same persistent mount, and it survives because both `cache_scan` and `_evict` match on suffix rather than deleting what they don't recognise.
+`CACHE_DIR` (default `/app/cache`, must be a persistent writable mount) holds `<id>.mp3`, `<id>.json` (metadata sidecar) and `<id>.jpg`. Sidecars and artwork are never evicted — they're tiny, and keeping them means a re-listen needs only the audio. `cache_scan()` at startup deletes stray `.part` files and backfills missing sidecars — which is also what cleans up an `<id>.pcm.part` left by a transcode that died mid-analysis, the reason that file is named the way it is. With Hue analysis on it additionally holds `<id>.beats.json`, likewise never evicted (~45 KiB for a five-minute track, and keeping it means a re-listen never re-runs librosa). It also holds `hue.json` (Hue credentials, `0600`) — not audio, but it belongs to the same persistent mount, and it survives because both `cache_scan` and `_evict` match on suffix rather than deleting what they don't recognise.
 
 ### Container layering
 

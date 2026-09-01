@@ -529,6 +529,55 @@ indistinguishable from broken hardware), or `color` with no stream running.
 **404** no such area. **400** unknown action, missing `color`, or a malformed
 one. **502** every PSK profile failed to handshake.
 
+## `GET /api/hue/analysis/<video_id>`
+
+```json
+{
+  "version": 1,
+  "duration": 213.4,
+  "tempo": 119.99,
+  "frame_seconds": 0.1,
+  "beats": [1.022, 1.509, 2.02, "..."],
+  "energy": [0.31, 0.88, "..."],
+  "brightness": [0.42, 0.55, "..."]
+}
+```
+
+Beat and timbre features for a cached track, for a client to drive the lights
+from. Produced during transcode by `analysis.py`, cached as `<id>.beats.json`.
+
+**Features, not colours.** The palette lives in the client, where it is cheap to
+change and can be unit tested. Baking colours in here would mean re-analysing
+every cached track — minutes of CPU — to adjust a constant.
+
+`beats` are seconds from the start of the track. `energy` and `brightness` are
+parallel arrays, both `0..1`, sampled every `frame_seconds` (0.1s), so the value
+at time *t* is `energy[floor(t / frame_seconds)]`. `energy` is RMS normalised
+against the track's 99th percentile rather than its maximum, so one clipped
+transient cannot leave the whole track dim; `brightness` is the spectral
+centroid mapped logarithmically between 100 Hz and Nyquist, because pitch is
+perceived in octaves.
+
+`tempo` is derived from the `beats` array rather than reported by librosa
+directly. librosa's own scalar is quantised onto the discrete grid its estimator
+searches and can disagree with the beats it returned alongside — 117.45 against
+beats that are 119.99 BPM apart — and a client trusting `tempo` would drift out
+of time with a client trusting `beats`.
+
+**202** `{"status": "pending", "queued": N}` — analysis is genuinely in flight.
+Poll it. **404** the track has no analysis *and none is scheduled*, which is the
+answer for a track cached before the bridge was paired, or with `HUE_ANALYZE`
+off, or on a host without librosa. That distinction is the whole point of the
+two codes: 202 for everything unanalysed would have a client poll forever for
+work nobody is doing. **400** malformed video id.
+
+Analysis is opt-out via `HUE_ANALYZE` (`auto` — the default, meaning on iff a
+bridge is paired — or `1`/`0`). It rides the transcode that already happens: a
+second ffmpeg output writes raw PCM next to the mp3, so the cost is one more
+encode of already-decoded frames rather than a second decode pass. It runs on
+its own single worker, never the download scheduler, and it can never fail a
+download — a track without analysis still plays.
+
 ---
 
 ## Media endpoints — not for the browser

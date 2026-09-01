@@ -35,9 +35,13 @@ RUN mkdir -p /app/cache
 ENV CACHE_DIR=/app/cache
 
 # Layer 4: Application code (frequently changed)
-# app.py alone — this image is the API and media server. The UI has its own
-# image built from web/, and nothing here renders HTML.
-COPY app.py .
+# This image is the API and media server. The UI has its own image built from
+# web/, and nothing here renders HTML.
+#
+# Every module app.py imports must be listed. It is not a package and there is
+# no setup.py to catch an omission — a missing file here builds and pushes
+# cleanly, then dies at startup on ModuleNotFoundError.
+COPY app.py hue.py analysis.py .
 
 EXPOSE 5001
 

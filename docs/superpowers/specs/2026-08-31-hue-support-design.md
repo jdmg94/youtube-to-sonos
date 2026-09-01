@@ -235,6 +235,22 @@ large positive number, so under the existing "lower wins" ordering it always
 yields to any prefetch, let alone the urgent track. With `PREFETCH_GATE` on it
 is also held off the CPU while an urgent download is in flight, for free.
 
+> **Superseded during implementation — this paragraph was wrong.** `_Scheduler`
+> has a fixed worker pool, so a low-priority job still *occupies a worker* for
+> the whole librosa pass; "always yields" only orders the queue, it does not
+> stop analysis from consuming one of the threads downloads share. Worse, the
+> free lunch is imaginary: `PREFETCH_GATE` gates **the wire**, and holding a
+> CPU-bound job off the network changes nothing about its contention for the
+> CPU. The two resources were conflated.
+>
+> Implemented instead as a **dedicated single worker with its own bounded
+> queue** in `analysis.py`. One worker because librosa is already internally
+> parallel and a second concurrent pass mostly buys cache contention; bounded
+> and **drop-on-full** because `submit()` is called from a download worker,
+> where blocking would stall the pipeline feeding the speaker, and because a
+> backlog means PCM files accumulating at ~2.6 MB per minute of audio each — a
+> missing analysis dims the lights, a full disk stops playback.
+
 **librosa is imported lazily inside that job.** numba's JIT costs seconds on
 first call, and this is a single-process threaded Flask app where a module-scope
 import would be paid by the first request to touch `app.py` at all.
@@ -247,6 +263,29 @@ import would be paid by the first request to touch `app.py` at all.
 - onset strength envelope (`librosa.onset.onset_strength`)
 - RMS and three band energies at a fixed hop
 - tempo
+
+> **Narrowed during implementation.** Shipped as `beats`, `tempo`, and two
+> parallel `0..1` tracks — `energy` (RMS) and `brightness` (spectral centroid,
+> log-mapped 100 Hz→Nyquist, because pitch is perceived in octaves) — on a
+> fixed 10 Hz timeline (`frame_seconds`).
+>
+> The onset envelope was dropped: `beat_track` already consumes it, and
+> publishing both means shipping the input and the conclusion. Three band
+> energies became one centroid because the render loop needs a *colour axis*,
+> and one number that says "where is the spectral mass" is directly that, where
+> three bands would need the client to reduce them to one anyway.
+>
+> The timeline is 10 Hz rather than librosa's native ~43 Hz: finer than a
+> listener can distinguish a light changing at, and the difference between a
+> ~45 KiB sidecar and a ~190 KiB one per five-minute track. Energy bins with
+> `max` (a transient peaking inside a bin is the entire point) and centroid
+> with `mean` (an averaged centroid is a steadier colour than whichever frame
+> happened to be brightest) — not interchangeable.
+>
+> `tempo` is **derived from the published beat list**, not taken from librosa's
+> scalar, which is quantised onto its estimator's grid and disagreed with its
+> own beats by 2.1% on a synthetic click track. A `tempo` that contradicts the
+> `beats` shipped beside it is a trap for the consumer.
 
 Never evicted, same rule as the metadata sidecar and the artwork: it is tiny,
 and keeping it means a re-listen needs only the audio back.
