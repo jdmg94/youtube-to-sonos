@@ -457,8 +457,23 @@ export interface HueArea {
   name: string | null;
   status: string | null;
   channels: number[];
-  /** channel id → `{x, y, z}` in the room. Unused today; the bridge's own map. */
-  positions: Record<string, unknown>;
+  /**
+   * channel id → where that light sits in the room, as the bridge reports it.
+   * Roughly -1..1 on each axis, with the origin at the middle of the room.
+   *
+   * `null` for a channel the bridge has no position for: the backend reads it
+   * with `.get('position')` and does not invent one. Configuring these is a
+   * manual step in the Hue app that most people never take, so treat "every
+   * light at the origin" as the expected input rather than the edge case.
+   */
+  positions: Record<string, ChannelPosition | null>;
+}
+
+/** A light's place in the room. See `HueArea.positions`. */
+export interface ChannelPosition {
+  x: number;
+  y: number;
+  z: number;
 }
 
 /** `[r, g, b]`, each 0–255. Out-of-range components are clamped server-side. */

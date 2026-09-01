@@ -238,10 +238,38 @@ async function checkHue() {
     "area positions is an object map",
     areas.every((a) => !!a.positions && typeof a.positions === "object"),
   );
+  /*
+   * The two things the gradient reads. Both fail silently if the bridge ever
+   * changes shape: a key that is not a channel is a position that never gets
+   * looked up, and a value missing an axis makes the spatial sort NaN — which
+   * `Array.prototype.sort` leaves in whatever order it found, so the lights
+   * would still light and the gradient would simply stop being spatial.
+   */
+  check(
+    "every positions key is one of the area's channels",
+    areas.every((a) => Object.keys(a.positions).every((key) => a.channels.includes(Number(key)))),
+    areas.map((a) => `${a.name}: ${Object.keys(a.positions).join(",")}`).join(" | "),
+  );
+  check(
+    "every position is {x,y,z} numbers or null",
+    areas.every((a) =>
+      Object.values(a.positions).every(
+        (p) => p === null || (["x", "y", "z"] as const).every((axis) => typeof p[axis] === "number"),
+      ),
+    ),
+  );
+  const placed = areas.reduce(
+    (n, a) => n + Object.values(a.positions).filter((p) => p !== null).length,
+    0,
+  );
   console.log(
     `  ->    ${areas.length} area(s): ` +
       `${areas.map((a) => `${a.name}[${a.channels.length}]`).join(", ") || "none"}`,
   );
+  // Worth printing even though nothing asserts on it: zero positions is the
+  // expected answer for an area nobody arranged in the Hue app, and it is the
+  // difference between a spatial gradient and one laid out by channel id.
+  console.log(`  ->    ${placed} channel(s) with a position`);
 
   const { lights } = await api.hueLights();
   check("lights is an array", Array.isArray(lights));

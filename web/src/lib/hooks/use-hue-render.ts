@@ -3,15 +3,30 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ApiError, api } from "@/lib/api/client";
-import { isAnalysisPending, type HueAnalysis, type NowPlaying, type Rgb } from "@/lib/api/types";
 import {
+  isAnalysisPending,
+  type HueAnalysis,
+  type HueArea,
+  type NowPlaying,
+  type Rgb,
+} from "@/lib/api/types";
+import {
+  DEFAULT_SETTINGS,
   IDLE_COLOR,
+  type Clock,
+  type ResolvedSettings,
   createRenderer,
   differsEnough,
+  anyDiffersEnough,
+  easeChannels,
+  hsvToRgb,
+  orderChannels,
   parseSonosTime,
   positionAt,
+  resolveSettings,
+  roundRgb,
+  spreadAcross,
   syncClock,
-  type Clock,
 } from "@/lib/hue";
 
 /**
@@ -81,13 +96,25 @@ export type AnalysisStatus =
   /** Nothing will ever analyse this track — a 404, which is final. */
   | "unavailable";
 
+/**
+ * The key the eased state uses when the room is addressed as a whole.
+ *
+ * Not a channel id — it cannot collide with one, since `spreadAcross` keys on
+ * stringified integers. Carrying the uniform case as a one-entry map means the
+ * loop has one piece of eased state instead of two, and gets the switch between
+ * the two addressing modes handled for free: `anyDiffersEnough` sees the key set
+ * change and sends, which it must, because the two modes light different lamps.
+ */
+const WHOLE_ROOM = "*";
+
 export interface HueRenderState {
   status: AnalysisStatus;
   /**
-   * The colour being sent, for the dialog's swatch. `null` unless `preview` is
-   * on — see `PREVIEW_INTERVAL_MS`.
+   * The colours being sent, in room order, for the dialog's swatch strip. One
+   * entry when the room is addressed as a whole. `null` unless `preview` is on
+   * — see `PREVIEW_INTERVAL_MS`.
    */
-  color: Rgb | null;
+  colors: Rgb[] | null;
 }
 
 interface HueRenderOptions {
@@ -98,12 +125,23 @@ interface HueRenderOptions {
   /** Whether anyone is looking at the swatch. */
   preview: boolean;
   /**
+   * The area being streamed to, for its channel list and their positions. The
+   * room is addressed as a whole when this is absent or lists no channels —
+   * never as an empty channel map, which the backend fills with black.
+   */
+  area?: HueArea | null;
+  /** The user's dials. Defaults to the shipped settings. */
+  settings?: ResolvedSettings;
+  /**
    * Called after `MAX_CONSECUTIVE_FAILURES` sends fail. The stream is gone and
    * only the backend knows why, so the caller should re-read health rather than
    * assume.
    */
   onStreamLost: () => void;
 }
+
+/** The shipped look, for a caller that has no settings to pass. */
+const SHIPPED_SETTINGS = resolveSettings(DEFAULT_SETTINGS);
 
 /**
  * Drive the lights from the track the speaker is playing.
@@ -131,6 +169,8 @@ export function useHueRender({
   nowPlaying,
   streaming,
   preview,
+  area = null,
+  settings = SHIPPED_SETTINGS,
   onStreamLost,
 }: HueRenderOptions): HueRenderState {
   /*
@@ -256,14 +296,29 @@ export function useHueRender({
 
   // -- Sending -------------------------------------------------------------
 
-  const [color, setColor] = useState<Rgb | null>(null);
+  const [colors, setColors] = useState<Rgb[] | null>(null);
+
+  /*
+   * The order to lay the gradient out in, recomputed only when the area
+   * changes. Empty when there is no area, which is what puts the loop into its
+   * whole-room mode — an area whose channel list the bridge has not filled in
+   * must not become an empty channel map, because the backend's `build_frame`
+   * blacks out every lamp it is not given a colour for.
+   */
+  const ordered = useMemo(
+    () => (area ? orderChannels(area.channels, area.positions) : []),
+    [area],
+  );
 
   // The `useAction` pattern: the loop reads these through a ref so that a new
-  // renderer or a new callback does not tear down and restart the interval,
-  // which would reset the failure count and the last-sent colour with it.
-  const latest = useRef({ renderer, preview, onStreamLost });
+  // renderer, a moved slider or a new callback does not tear down and restart
+  // the interval, which would reset the failure count, the eased colours and
+  // the last-sent frame with it. A slider is dragged, so that matters: rebuilding
+  // the loop on every pixel of travel would ease from idle each time and make
+  // the room stutter for as long as the drag lasted.
+  const latest = useRef({ renderer, preview, ordered, settings, onStreamLost });
   useEffect(() => {
-    latest.current = { renderer, preview, onStreamLost };
+    latest.current = { renderer, preview, ordered, settings, onStreamLost };
   });
 
   useEffect(() => {
@@ -273,13 +328,33 @@ export function useHueRender({
     let handle: ReturnType<typeof setInterval> | undefined;
     let inFlight = false;
     let failures = 0;
-    let lastSent: Rgb | null = null;
+    /** Sub-integer, so a slow ease creeps across `COLOR_EPSILON` rather than stalling. */
+    let eased: Record<string, Rgb> | null = null;
+    let lastSent: Record<string, Rgb> | null = null;
+    let lastTickMs: number | null = null;
     let lastPreviewMs = -Infinity;
 
     const tick = () => {
-      const { renderer: current, preview: showing, onStreamLost: lost } = latest.current;
+      const {
+        renderer: current,
+        preview: showing,
+        ordered: room,
+        settings: dials,
+        onStreamLost: lost,
+      } = latest.current;
       const nowMs = performance.now();
       const clock = clockRef.current;
+
+      /*
+       * Measured, not assumed to be `SEND_INTERVAL_MS`. That is the whole point
+       * of easing on a time constant: a hidden tab's interval is clamped to
+       * about 1 Hz, and a tick that pretended 16 of them had passed in one
+       * would smooth the lights to a crawl exactly where nobody could see why.
+       * The first tick has no previous one, so it snaps — a stream that has
+       * just started should show the music, not fade up to it.
+       */
+      const dt = lastTickMs === null ? Infinity : (nowMs - lastTickMs) / 1000;
+      lastTickMs = nowMs;
 
       /*
        * No renderer or no clock is not a reason to send nothing. The backend
@@ -287,24 +362,56 @@ export function useHueRender({
        * frozen on the previous track's final beat flash — which looks like a
        * crash. `IDLE_COLOR` is the one colour that reads as "off duty".
        */
-      const next = current && clock ? current.colorAt(positionAt(clock, nowMs)) : IDLE_COLOR;
+      let target: Record<string, Rgb>;
+      if (current && clock) {
+        const frame = current.frameAt(positionAt(clock, nowMs), {
+          brightness: dials.brightness,
+          beatDecay: dials.beatDecay,
+          spreadDeg: dials.spreadDeg,
+        });
+        target =
+          room.length > 0
+            ? spreadAcross(frame, room, dials.spreadDeg)
+            : { [WHOLE_ROOM]: hsvToRgb(frame.hue, frame.saturation, frame.value) };
+      } else {
+        // The idle colour goes to the room as a whole even when the channels
+        // are known: there is no gradient to draw when there is no music.
+        target = { [WHOLE_ROOM]: IDLE_COLOR };
+      }
+
+      eased = easeChannels(eased, target, dt, dials.tauSeconds);
+      const next: Record<string, Rgb> = {};
+      for (const key of Object.keys(eased)) next[key] = roundRgb(eased[key]);
 
       if (showing && nowMs - lastPreviewMs >= PREVIEW_INTERVAL_MS) {
         lastPreviewMs = nowMs;
+        const strip =
+          room.length > 0 ? room.map((id) => next[String(id)]) : [next[WHOLE_ROOM]];
         // Compared before storing: a held colour would otherwise re-render the
         // page four times a second to say nothing changed.
-        setColor((prev) => (prev && !differsEnough(prev, next) ? prev : next));
+        setColors((prev) =>
+          prev &&
+          prev.length === strip.length &&
+          prev.every((was, i) => !differsEnough(was, strip[i]))
+            ? prev
+            : strip,
+        );
       }
 
       // Skipped, never queued. These are setpoints, not frames: the freshest
       // one is the only one worth sending, and stacking requests behind a slow
       // bridge would drive the lights from an ever-growing backlog.
       if (inFlight) return;
-      if (lastSent && !differsEnough(next, lastSent)) return;
+      if (!anyDiffersEnough(next, lastSent)) return;
+
+      // A one-entry whole-room frame goes as a bare colour, which is what the
+      // backend applies to every channel it knows about — including ones the
+      // area gained since the stream started.
+      const payload = WHOLE_ROOM in next ? next[WHOLE_ROOM] : next;
 
       inFlight = true;
       api
-        .hueColor(next, controller.signal)
+        .hueColor(payload, controller.signal)
         .then(() => {
           lastSent = next;
           failures = 0;
@@ -335,7 +442,7 @@ export function useHueRender({
   }, [streaming]);
 
   // `streaming` as well as `preview`: the loop stops when the stream does, so
-  // the last colour it computed would otherwise sit in the swatch as a live
+  // the last colours it computed would otherwise sit in the swatch as a live
   // readout of a bridge that is no longer being driven.
-  return { status, color: preview && streaming ? color : null };
+  return { status, colors: preview && streaming ? colors : null };
 }

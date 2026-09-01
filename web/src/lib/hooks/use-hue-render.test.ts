@@ -18,7 +18,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
-import type { HueAnalysis, NowPlaying, Rgb } from "@/lib/api/types";
+import type { HueAnalysis, HueArea, NowPlaying, Rgb } from "@/lib/api/types";
 import { IDLE_COLOR } from "@/lib/hue";
 import {
   ANALYSIS_POLL_MS,
@@ -89,8 +89,20 @@ let analysisReply: Reply = { status: 200, body: analysis() };
 /** What `/api/hue/stream` answers next. Async so a send can be held open. */
 let colorReply: () => Promise<Reply> = async () => ({ status: 200, body: { streaming: true } });
 
+/** The `color` field of every `/api/hue/stream` body, in order. */
+type Sent = Rgb | Record<string, Rgb>;
+
 let analysisCalls = 0;
-let colorCalls: Rgb[] = [];
+let colorCalls: Sent[] = [];
+
+/** A sent frame as a comparable string, whichever shape it took. */
+const shape = (sent: Sent) => JSON.stringify(sent);
+
+/** Narrows to the per-channel shape, failing the test rather than the types. */
+function channels(sent: Sent): Record<string, Rgb> {
+  assert.ok(!Array.isArray(sent), `expected a channel map, got ${shape(sent)}`);
+  return sent;
+}
 
 function respond({ status, body }: Reply): Response {
   return {
@@ -111,7 +123,7 @@ function fakeNetwork() {
       return respond(analysisReply);
     }
     if (url.includes("/api/hue/stream")) {
-      const body = JSON.parse(String(init?.body)) as { action: string; color: Rgb };
+      const body = JSON.parse(String(init?.body)) as { action: string; color: Sent };
       colorCalls.push(body.color);
       return respond(await colorReply());
     }
@@ -155,17 +167,38 @@ let container: HTMLDivElement | null = null;
 let state: HueRenderState;
 let lost = 0;
 
+/** An area with `count` lights and no positions — the realistic bridge answer. */
+function area(count: number, positions: HueArea["positions"] = {}): HueArea {
+  return {
+    id: "area-1",
+    name: "Living room",
+    status: "active",
+    channels: Array.from({ length: count }, (_, i) => i),
+    positions,
+  };
+}
+
 interface Props {
   nowPlaying?: NowPlaying | null;
   streaming?: boolean;
   preview?: boolean;
+  area?: HueArea | null;
+  settings?: Parameters<typeof useHueRender>[0]["settings"];
 }
 
-function Probe({ nowPlaying: track = nowPlaying(), streaming = true, preview = false }: Props) {
+function Probe({
+  nowPlaying: track = nowPlaying(),
+  streaming = true,
+  preview = false,
+  area: room = null,
+  settings,
+}: Props) {
   state = useHueRender({
     nowPlaying: track,
     streaming,
     preview,
+    area: room,
+    settings,
     onStreamLost: () => {
       lost += 1;
     },
@@ -325,11 +358,11 @@ describe("useHueRender: sending", () => {
   it("drives the lights from the music once it can", async () => {
     render();
     await advance(ticks(5));
-    const sent = colorCalls.filter((color) => color.join() !== IDLE_COLOR.join());
+    const sent = colorCalls.filter((color) => shape(color) !== shape(IDLE_COLOR));
     assert.ok(sent.length >= 2, `expected rendered colours, got ${JSON.stringify(colorCalls)}`);
     // Distinct values, not just repeats: the clock has to be advancing between
     // ticks, which is the whole reason the loop runs faster than the SSE feed.
-    assert.ok(new Set(sent.map((color) => color.join())).size >= 2);
+    assert.ok(new Set(sent.map(shape)).size >= 2);
   });
 
   it("says nothing when there is nothing to say", async () => {
@@ -337,8 +370,12 @@ describe("useHueRender: sending", () => {
     // colour. The room holds it for free — the backend is still resending at
     // 25 Hz — and a loop that posted it anyway would be 16 requests a second
     // to change nothing.
+    //
+    // The long warm-up is the easing: the loop starts at the idle colour and
+    // approaches the held one asymptotically, so "settled" is a state it
+    // arrives at over a second rather than on the second tick.
     render({ nowPlaying: nowPlaying({ state: "PAUSED_PLAYBACK" }) });
-    await advance(ticks(6));
+    await advance(ticks(25));
     const settled = colorCalls.length;
     await advance(ticks(8));
     assert.equal(colorCalls.length, settled);
@@ -418,14 +455,21 @@ describe("useHueRender: the swatch", () => {
     // nobody has open is four wasted renders a second for the life of the tab.
     render({ preview: false });
     await advance(ticks(6));
-    assert.equal(state.color, null);
+    assert.equal(state.colors, null);
     assert.ok(colorCalls.length >= 1, "the lights are still being driven");
   });
 
   it("shows what is being sent while the dialog is open", async () => {
     render({ preview: true });
     await advance(ticks(6));
-    assert.ok(state.color, "expected a colour");
+    assert.ok(state.colors, "expected a colour");
+    assert.equal(state.colors?.length, 1, "one swatch for a room with no channel list");
+  });
+
+  it("shows one swatch per light, in room order", async () => {
+    render({ preview: true, area: area(3) });
+    await advance(ticks(6));
+    assert.equal(state.colors?.length, 3);
   });
 
   it("goes dark when the stream stops", async () => {
@@ -433,8 +477,112 @@ describe("useHueRender: the swatch", () => {
     // otherwise sit there as a live readout of a bridge nothing is driving.
     render({ preview: true });
     await advance(ticks(6));
-    assert.ok(state.color);
+    assert.ok(state.colors);
     render({ preview: true, streaming: false });
-    assert.equal(state.color, null);
+    assert.equal(state.colors, null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("useHueRender: addressing the room", () => {
+  it("sends a bare colour when it has no channel list", async () => {
+    // Not an empty map. `build_frame` fills every channel it is not given a
+    // colour for with black, so `{}` is not "leave the lights alone" — it is
+    // "switch the room off", and it would arrive as a broken feature rather
+    // than as a missing area.
+    render();
+    await advance(ticks(2));
+    assert.ok(colorCalls.length >= 1);
+    assert.ok(Array.isArray(colorCalls[0]), `expected a bare colour: ${shape(colorCalls[0])}`);
+  });
+
+  it("sends a bare colour for an area the bridge lists no channels for", async () => {
+    render({ area: area(0) });
+    await advance(ticks(2));
+    assert.ok(colorCalls.length >= 1);
+    assert.ok(Array.isArray(colorCalls[0]), `expected a bare colour: ${shape(colorCalls[0])}`);
+  });
+
+  it("addresses each light by id once the area names them", async () => {
+    render({ area: area(3) });
+    await advance(ticks(4));
+    const perChannel = colorCalls.filter((sent) => !Array.isArray(sent));
+    assert.ok(perChannel.length >= 1, `never addressed channels: ${JSON.stringify(colorCalls)}`);
+    assert.deepEqual(Object.keys(channels(perChannel[0])).sort(), ["0", "1", "2"]);
+  });
+
+  it("gives the ends of the room different colours", async () => {
+    // The whole point of the spread. Same frame, so any difference between the
+    // two ends is the hue offset and nothing else.
+    render({ area: area(3), settings: { brightness: 1, beatDecay: 0.35, spreadDeg: 120, tauSeconds: 0.05 } });
+    await advance(ticks(4));
+    const perChannel = colorCalls.filter((sent) => !Array.isArray(sent)).map(channels);
+    assert.ok(perChannel.length >= 1);
+    const frame = perChannel[perChannel.length - 1];
+    assert.notDeepEqual(frame["0"], frame["2"]);
+  });
+
+  it("gives every light the same colour at zero spread", async () => {
+    render({ area: area(3), settings: { brightness: 1, beatDecay: 0.35, spreadDeg: 0, tauSeconds: 0.05 } });
+    await advance(ticks(4));
+    const perChannel = colorCalls.filter((sent) => !Array.isArray(sent)).map(channels);
+    assert.ok(perChannel.length >= 1);
+    for (const frame of perChannel) {
+      assert.deepEqual(frame["0"], frame["1"]);
+      assert.deepEqual(frame["1"], frame["2"]);
+    }
+  });
+
+  it("eases into a track that starts mid-stream instead of cutting to it", async () => {
+    /*
+     * The transition slider only means anything across a *gap*, and the loop
+     * snaps on its first tick by design — so the gap has to be made the way a
+     * listener makes one: stream up and idle, then a song starts under it.
+     *
+     * Paused, so the target is a fixed colour and every difference between
+     * consecutive sends is the ease and nothing else.
+     */
+    const heavy = { brightness: 1, beatDecay: 0.35, spreadDeg: 0, tauSeconds: 2 };
+    render({ nowPlaying: null, settings: heavy });
+    await advance(ticks(2));
+    assert.deepEqual(colorCalls[0], IDLE_COLOR);
+
+    render({ nowPlaying: nowPlaying({ state: "PAUSED_PLAYBACK" }), settings: heavy });
+    await advance(ticks(6));
+
+    const sent = colorCalls as Rgb[];
+    assert.ok(sent.length >= 3, `too few sends to judge: ${JSON.stringify(sent)}`);
+    assert.notDeepEqual(sent[sent.length - 1], IDLE_COLOR, "never left the idle colour");
+    // A cut would arrive in one tick and then hold. Still moving several ticks
+    // in is what says the loop is crossing the gap rather than jumping it.
+    assert.notDeepEqual(
+      sent[sent.length - 1],
+      sent[sent.length - 2],
+      "arrived in one step instead of easing",
+    );
+  });
+
+  it("creeps rather than stalling when a tick moves less than one step", async () => {
+    /*
+     * The stall trap, from the outside. A loop that rounded its own state would
+     * compute a sub-integer move, round it away, and freeze there — sending
+     * nothing ever again, with the room stuck on the idle colour.
+     *
+     * The time constant here is well past the slider's maximum, deliberately:
+     * what makes the trap bite is a per-tick move under half a step, and this
+     * is the cheapest way to hold the loop in that condition for a whole test
+     * rather than for the last few ticks of a convergence. The arithmetic has
+     * to survive any time constant; the slider's range is a product decision
+     * that can move without this becoming safe to get wrong.
+     */
+    const glacial = { brightness: 1, beatDecay: 0.35, spreadDeg: 0, tauSeconds: 60 };
+    render({ nowPlaying: null, settings: glacial });
+    await advance(ticks(2));
+    const early = colorCalls.length;
+
+    render({ nowPlaying: nowPlaying({ state: "PAUSED_PLAYBACK" }), settings: glacial });
+    await advance(ticks(30));
+    assert.ok(colorCalls.length > early, "the ease stalled instead of creeping");
   });
 });

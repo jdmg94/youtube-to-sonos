@@ -14,23 +14,38 @@ import { describe, it } from "node:test";
 
 import {
   BEAT_DECAY_FRACTION,
+  BRIGHTNESS_FLOOR,
   COLOR_EPSILON,
+  DECAY_MAX,
+  DECAY_MIN,
+  DEFAULT_SETTINGS,
   HUE_MAX_DEG,
   HUE_MIN_DEG,
+  IDLE_COLOR,
   MIN_VALUE,
   REPORTED_POSITION_BIAS_SECONDS,
   RESYNC_THRESHOLD_SECONDS,
+  SPREAD_MAX_DEG,
+  TAU_MAX_SECONDS,
+  TAU_MIN_SECONDS,
   type Clock,
+  anyDiffersEnough,
   createRenderer,
   differsEnough,
+  easeChannels,
+  easeToward,
   hsvToRgb,
   lastBeatIndex,
+  orderChannels,
   parseSonosTime,
   positionAt,
+  resolveSettings,
+  roundRgb,
   sample,
+  spreadAcross,
   syncClock,
 } from "@/lib/hue";
-import type { HueAnalysis, Rgb } from "@/lib/api/types";
+import type { ChannelPosition, HueAnalysis, Rgb } from "@/lib/api/types";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -602,5 +617,408 @@ describe("differsEnough", () => {
   it("honours a caller's own threshold", () => {
     assert.equal(differsEnough([0, 0, 0], [10, 0, 0], 20), false);
     assert.equal(differsEnough([0, 0, 0], [30, 0, 0], 20), true);
+  });
+});
+
+describe("anyDiffersEnough", () => {
+  const base = { "0": [10, 20, 30] as Rgb, "1": [10, 20, 30] as Rgb };
+
+  it("sends when any single channel has moved", () => {
+    // A frame is all-or-nothing: the datagram carries every channel, so one
+    // lamp needing an update is the whole room needing one.
+    assert.equal(anyDiffersEnough({ ...base, "1": [10, 20, 30 + COLOR_EPSILON] }, base), true);
+    assert.equal(anyDiffersEnough({ ...base, "1": [10, 20, 31] }, base), false);
+  });
+
+  it("sends when the channel set itself changed", () => {
+    // A lamp joining or leaving the area changes what the datagram addresses,
+    // and every remaining channel can be within epsilon while that happens.
+    assert.equal(anyDiffersEnough({ ...base, "2": [10, 20, 30] }, base), true);
+    assert.equal(anyDiffersEnough({ "0": [10, 20, 30] }, base), true);
+  });
+
+  it("sends when there is nothing to compare against", () => {
+    assert.equal(anyDiffersEnough(base, null), true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Palette options
+// ---------------------------------------------------------------------------
+
+/** A track that moves through timbre and loudness, so options have something to bite on. */
+const MOVING = analysis({
+  beats: beatsAt(120, 20),
+  energy: ramp(0.1, 0.9, 101),
+  brightness: ramp(0.1, 0.9, 101),
+  duration: 10.1,
+});
+
+describe("PaletteOptions: defaults", () => {
+  it("reproduces the unparameterised output exactly", () => {
+    // The whole point of defaulting to today's constants: the 600 lines of
+    // tests above keep meaning what they meant, and adding the options is not
+    // silently a retune.
+    const renderer = createRenderer(MOVING);
+    for (const t of [0, 0.37, 2.5, 5, 9.9]) {
+      assert.deepEqual(
+        renderer.colorAt(t, { brightness: 1, beatDecay: BEAT_DECAY_FRACTION, spreadDeg: 0 }),
+        renderer.colorAt(t),
+      );
+    }
+  });
+
+  it("agrees with frameAt through hsvToRgb", () => {
+    // colorAt is defined as this composition; if they ever disagree, the spread
+    // is working from a different colour than the swatch shows.
+    const renderer = createRenderer(MOVING);
+    for (const t of [0, 1.1, 4.4, 8.8]) {
+      const frame = renderer.frameAt(t);
+      assert.deepEqual(hsvToRgb(frame.hue, frame.saturation, frame.value), renderer.colorAt(t));
+    }
+  });
+});
+
+describe("PaletteOptions: brightness", () => {
+  it("scales value and leaves the colour alone", () => {
+    const renderer = createRenderer(MOVING);
+    const full = renderer.frameAt(5);
+    const half = renderer.frameAt(5, { brightness: 0.5 });
+
+    assert.equal(half.hue, full.hue);
+    assert.equal(half.saturation, full.saturation);
+    assert.ok(Math.abs(half.value - full.value * 0.5) < 1e-9, `${half.value} vs ${full.value}`);
+  });
+
+  it("dims the lamp proportionally, so contrast survives", () => {
+    // The alternative — capping the ceiling while MIN_VALUE holds the floor —
+    // squashes the dynamic range as it dims, and a dim room stops following the
+    // music at all. Proportional scaling keeps a quiet passage and a chorus as
+    // far apart in relative terms as they were.
+    const renderer = createRenderer(MOVING);
+    for (const t of [1, 5, 9]) {
+      const full = renderer.colorAt(t);
+      const dim = renderer.colorAt(t, { brightness: 0.5 });
+      for (let i = 0; i < 3; i += 1) {
+        assert.ok(Math.abs(dim[i] - full[i] * 0.5) <= 1, `channel ${i}: ${dim[i]} vs ${full[i]}`);
+      }
+    }
+  });
+
+  it("keeps a quiet passage visible at the dimmest setting", () => {
+    // The slider does not reach zero, precisely so this stays true: lights that
+    // go out during an intro read as a crash rather than as atmosphere.
+    const quiet = createRenderer(analysis({ energy: constant(0), brightness: constant(0.5) }));
+    const dimmest = quiet.colorAt(5, { brightness: BRIGHTNESS_FLOOR });
+    assert.ok(Math.max(...dimmest) > 0, `went dark: ${dimmest.join()}`);
+  });
+});
+
+describe("PaletteOptions: beatDecay", () => {
+  const METRONOME = analysis({
+    beats: beatsAt(120, 20),
+    energy: constant(0.5),
+    brightness: constant(0.5),
+    duration: 10,
+  });
+
+  it("makes a flash outlast a shorter one", () => {
+    const renderer = createRenderer(METRONOME);
+    // Sampled a quarter-beat after a beat, where both decays are still running.
+    const at = 4 + 0.125;
+    const tight = renderer.frameAt(at, { beatDecay: DECAY_MIN }).value;
+    const loose = renderer.frameAt(at, { beatDecay: DECAY_MAX }).value;
+    assert.ok(loose > tight, `loose ${loose} should outlast tight ${tight}`);
+  });
+
+  it("still lands each flash at full strength on the beat itself", () => {
+    // Decay changes how long a pulse lives, never how hard it hits — otherwise
+    // the "calm" end of the slider would also mean "quieter beats", which is a
+    // second thing the user did not ask for.
+    const renderer = createRenderer(METRONOME);
+    const tight = renderer.frameAt(4, { beatDecay: DECAY_MIN }).value;
+    const loose = renderer.frameAt(4, { beatDecay: DECAY_MAX }).value;
+    assert.ok(Math.abs(tight - loose) < 1e-9, `${tight} vs ${loose}`);
+  });
+});
+
+describe("PaletteOptions: the arc reduction", () => {
+  it("leaves room for the spread on both sides", () => {
+    // HUE_MAX_DEG stops at 280 so the wheel cannot wrap and put the brightest
+    // timbre back on the darkest's red. A naive hue+offset reintroduces exactly
+    // that, so the base hue is computed into an arc narrowed by the spread.
+    const renderer = createRenderer(MOVING);
+    for (const spreadDeg of [0, 40, 120, SPREAD_MAX_DEG]) {
+      for (let t = 0; t <= 10; t += 0.25) {
+        const { hue } = renderer.frameAt(t, { spreadDeg });
+        assert.ok(
+          hue - spreadDeg / 2 >= HUE_MIN_DEG - 1e-9,
+          `spread ${spreadDeg} at t=${t}: ${hue} runs off the bottom`,
+        );
+        assert.ok(
+          hue + spreadDeg / 2 <= HUE_MAX_DEG + 1e-9,
+          `spread ${spreadDeg} at t=${t}: ${hue} runs off the top`,
+        );
+      }
+    }
+  });
+
+  it("pins the base hue when the spread claims the whole arc", () => {
+    // The honest consequence of asking for the entire arc across the room at
+    // once: there is no range left for the music to move through, and the room
+    // shows a static rainbow. Degenerate, but coherent.
+    const renderer = createRenderer(MOVING);
+    const mid = (HUE_MIN_DEG + HUE_MAX_DEG) / 2;
+    for (const t of [0, 5, 10]) {
+      assert.ok(
+        Math.abs(renderer.frameAt(t, { spreadDeg: SPREAD_MAX_DEG }).hue - mid) < 1e-9,
+        `t=${t} was not pinned`,
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The spread
+// ---------------------------------------------------------------------------
+
+const at = (x: number, y: number, z = 0): ChannelPosition => ({ x, y, z });
+
+describe("orderChannels", () => {
+  it("runs the gradient along the room's longer axis", () => {
+    // A room is usually longer in one direction. Ordering across the narrow one
+    // puts the extremes a metre apart, where the gradient is invisible.
+    const wideX = orderChannels([1, 2, 3], {
+      "1": at(0.9, 0.1),
+      "2": at(-0.9, -0.1),
+      "3": at(0, 0),
+    });
+    assert.deepEqual(wideX, [2, 3, 1]);
+
+    const wideY = orderChannels([1, 2, 3], {
+      "1": at(0.1, 0.9),
+      "2": at(-0.1, -0.9),
+      "3": at(0, 0),
+    });
+    assert.deepEqual(wideY, [2, 3, 1]);
+  });
+
+  it("falls back to channel id when nobody configured the positions", () => {
+    // The realistic input. Setting positions is a manual step in the Hue app,
+    // so every light at the origin is the expected case, not the edge one.
+    assert.deepEqual(
+      orderChannels([3, 1, 2], { "1": at(0, 0), "2": at(0, 0), "3": at(0, 0) }),
+      [1, 2, 3],
+    );
+  });
+
+  it("falls back when any single position is missing", () => {
+    // A partial ranking would drop the unpositioned lamp somewhere arbitrary
+    // inside an otherwise meaningful gradient, which is worse than admitting
+    // the whole ordering is arbitrary.
+    assert.deepEqual(orderChannels([3, 1, 2], { "1": at(0.9, 0), "3": at(-0.9, 0) }), [1, 2, 3]);
+    assert.deepEqual(
+      orderChannels([3, 1, 2], { "1": at(0.9, 0), "2": null, "3": at(-0.9, 0) }),
+      [1, 2, 3],
+    );
+  });
+
+  it("returns every channel, and only the channels it was given", () => {
+    // positions can name a channel the stream is not addressing; the stream's
+    // list is authoritative.
+    const ordered = orderChannels([2, 1], { "1": at(1, 0), "2": at(-1, 0), "9": at(0.5, 0) });
+    assert.deepEqual([...ordered].sort(), [1, 2]);
+  });
+
+  it("handles the empty and single cases without inventing an order", () => {
+    assert.deepEqual(orderChannels([], {}), []);
+    assert.deepEqual(orderChannels([7], { "7": at(0.3, 0.2) }), [7]);
+  });
+});
+
+describe("spreadAcross", () => {
+  const frame = { hue: 140, saturation: 1, value: 1 };
+
+  it("gives every light the same colour at zero spread", () => {
+    // Today's behaviour, still reachable from the slider — someone watching a
+    // film wants the room to agree with itself.
+    const colors = spreadAcross(frame, [1, 2, 3], 0);
+    assert.deepEqual(colors["1"], colors["2"]);
+    assert.deepEqual(colors["2"], colors["3"]);
+  });
+
+  it("leaves a lone light unshifted", () => {
+    // Rank 0.5 of one channel, so the offset is zero without a special case.
+    const alone = spreadAcross(frame, [4], 80);
+    assert.deepEqual(alone["4"], hsvToRgb(frame.hue, frame.saturation, frame.value));
+  });
+
+  it("puts the ends of the room a full spread apart", () => {
+    const colors = spreadAcross(frame, [1, 2, 3], 80);
+    assert.deepEqual(colors["1"], hsvToRgb(100, 1, 1));
+    assert.deepEqual(colors["3"], hsvToRgb(180, 1, 1));
+    assert.deepEqual(colors["2"], hsvToRgb(140, 1, 1));
+  });
+
+  it("keys on the channel id as a string, which is what the bridge is sent", () => {
+    // JSON object keys are strings and the backend does int(k) on them.
+    assert.deepEqual(Object.keys(spreadAcross(frame, [10, 2], 40)).sort(), ["10", "2"]);
+  });
+
+  it("returns nothing for no channels, rather than a colour nobody shows", () => {
+    assert.deepEqual(spreadAcross(frame, [], 40), {});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Easing
+// ---------------------------------------------------------------------------
+
+describe("easeToward", () => {
+  it("is frame-rate independent", () => {
+    // The load-bearing property. The send loop is setInterval, which a hidden
+    // tab throttles to roughly 1 Hz — and a tab playing music through a speaker
+    // is hidden most of the time. A fixed per-tick fraction would smooth a
+    // backgrounded tab twenty times harder, so the lights would go sluggish
+    // exactly when nobody could see why.
+    const from: Rgb = [0, 0, 0];
+    const to: Rgb = [255, 128, 64];
+
+    const oneStep = easeToward(from, to, 0.1, 0.3);
+    let many: Rgb = from;
+    for (let i = 0; i < 10; i += 1) many = easeToward(many, to, 0.01, 0.3);
+
+    for (let i = 0; i < 3; i += 1) {
+      assert.ok(Math.abs(oneStep[i] - many[i]) < 1e-6, `channel ${i}: ${oneStep[i]} vs ${many[i]}`);
+    }
+  });
+
+  it("snaps when a throttled tab hands it a whole second", () => {
+    const snapped = easeToward([0, 0, 0], [255, 255, 255], 1, TAU_MIN_SECONDS);
+    for (const c of snapped) assert.ok(c > 254.9, `barely moved: ${c}`);
+  });
+
+  it("never overshoots, however long the step", () => {
+    const target: Rgb = [200, 100, 50];
+    for (const dt of [0.06, 1, 60]) {
+      const eased = easeToward([0, 0, 0], target, dt, TAU_MAX_SECONDS);
+      for (let i = 0; i < 3; i += 1) assert.ok(eased[i] <= target[i] + 1e-9, `dt=${dt}`);
+    }
+  });
+
+  it("keeps sub-integer state, so a slow ease cannot stall", () => {
+    // Rounding every step is the trap: with heavy smoothing a tick moves the
+    // colour by less than half a unit, which rounds back to where it started
+    // and the room freezes on a stale setpoint forever. Floats accumulate; the
+    // caller rounds once, at the point of sending.
+    let eased: Rgb = [0, 0, 0];
+    const target: Rgb = [COLOR_EPSILON, 0, 0];
+    let ticks = 0;
+    while (!differsEnough(roundRgb(eased), [0, 0, 0]) && ticks < 1000) {
+      eased = easeToward(eased, target, 0.06, TAU_MAX_SECONDS);
+      ticks += 1;
+    }
+    assert.ok(ticks < 1000, "a slow ease never crossed the send threshold");
+  });
+
+  it("holds still when it is already there", () => {
+    assert.deepEqual(easeToward([1, 2, 3], [1, 2, 3], 0.06, 0.3), [1, 2, 3]);
+  });
+});
+
+describe("easeChannels", () => {
+  const target = { "1": [200, 0, 0] as Rgb, "2": [0, 200, 0] as Rgb };
+
+  it("eases a light that has just joined the area up from idle", () => {
+    // Not from black, and not snapped to full: a lamp rejoining mid-track fades
+    // in from the same colour the room rests at.
+    const eased = easeChannels({ "1": [200, 0, 0] }, target, 0.06, TAU_MAX_SECONDS);
+    assert.deepEqual(eased["1"], [200, 0, 0]);
+    for (let i = 0; i < 3; i += 1) {
+      const moved = eased["2"][i] - IDLE_COLOR[i];
+      assert.ok(Math.abs(moved) > 0 || target["2"][i] === IDLE_COLOR[i], "channel 2 did not ease");
+      assert.ok(
+        Math.min(IDLE_COLOR[i], target["2"][i]) - 1e-9 <= eased["2"][i] &&
+          eased["2"][i] <= Math.max(IDLE_COLOR[i], target["2"][i]) + 1e-9,
+        `channel 2[${i}] left the idle→target interval: ${eased["2"][i]}`,
+      );
+    }
+  });
+
+  it("forgets a light that has left", () => {
+    const eased = easeChannels({ "1": [1, 1, 1], "9": [2, 2, 2] }, target, 0.06, 0.3);
+    assert.deepEqual(Object.keys(eased).sort(), ["1", "2"]);
+  });
+
+  it("starts from idle when there is no previous frame at all", () => {
+    const eased = easeChannels(null, target, 0.06, TAU_MAX_SECONDS);
+    assert.deepEqual(Object.keys(eased).sort(), ["1", "2"]);
+    assert.ok(eased["1"][0] < 200, "snapped instead of easing");
+  });
+});
+
+describe("roundRgb", () => {
+  it("hands the bridge integers", () => {
+    assert.deepEqual(roundRgb([0.4, 127.5, 254.6]), [0, 128, 255]);
+    for (const c of roundRgb([1.2, 3.7, 9.9])) assert.ok(Number.isInteger(c));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+describe("resolveSettings", () => {
+  it("maps the ends of each slider onto the ends of its range", () => {
+    const dimmest = resolveSettings({ brightness: 0, transition: 0, spread: 0 });
+    assert.ok(Math.abs(dimmest.brightness - BRIGHTNESS_FLOOR) < 1e-9);
+    assert.ok(Math.abs(dimmest.tauSeconds - TAU_MIN_SECONDS) < 1e-9);
+    assert.ok(Math.abs(dimmest.beatDecay - DECAY_MIN) < 1e-9);
+    assert.equal(dimmest.spreadDeg, 0);
+
+    const most = resolveSettings({ brightness: 100, transition: 100, spread: 100 });
+    assert.ok(Math.abs(most.brightness - 1) < 1e-9);
+    assert.ok(Math.abs(most.tauSeconds - TAU_MAX_SECONDS) < 1e-9);
+    assert.ok(Math.abs(most.beatDecay - DECAY_MAX) < 1e-9);
+    assert.ok(Math.abs(most.spreadDeg - SPREAD_MAX_DEG) < 1e-9);
+  });
+
+  it("moves every output in one direction as its slider rises", () => {
+    // A slider that is not monotonic is a slider nobody can aim.
+    let previous = resolveSettings({ brightness: 0, transition: 0, spread: 0 });
+    for (let position = 10; position <= 100; position += 10) {
+      const next = resolveSettings({
+        brightness: position,
+        transition: position,
+        spread: position,
+      });
+      assert.ok(next.brightness > previous.brightness, `brightness at ${position}`);
+      assert.ok(next.tauSeconds > previous.tauSeconds, `tau at ${position}`);
+      assert.ok(next.beatDecay > previous.beatDecay, `decay at ${position}`);
+      assert.ok(next.spreadDeg > previous.spreadDeg, `spread at ${position}`);
+      previous = next;
+    }
+  });
+
+  it("clamps a position localStorage should never have held", () => {
+    // usePersistedState hands back whatever parsed, and a hand-edited or
+    // stale key must not produce a hue outside the arc or a negative tau.
+    assert.deepEqual(
+      resolveSettings({ brightness: -50, transition: -1, spread: -10 }),
+      resolveSettings({ brightness: 0, transition: 0, spread: 0 }),
+    );
+    assert.deepEqual(
+      resolveSettings({ brightness: 500, transition: 101, spread: 1e9 }),
+      resolveSettings({ brightness: 100, transition: 100, spread: 100 }),
+    );
+  });
+
+  it("ships defaults that are subtle rather than a demo", () => {
+    // A first run should look like the room has depth, not like a light show
+    // someone forgot to turn off.
+    const defaults = resolveSettings(DEFAULT_SETTINGS);
+    assert.ok(defaults.spreadDeg > 0, "no spread at all wastes the feature");
+    assert.ok(defaults.spreadDeg < SPREAD_MAX_DEG / 4, `too wide by default: ${defaults.spreadDeg}`);
+    assert.ok(defaults.brightness > 0.7, `too dim by default: ${defaults.brightness}`);
   });
 });

@@ -14,7 +14,7 @@
  * estimate — Sonos reports its position to the nearest second, roughly every
  * two seconds — and everything hard about this feature lives there.
  */
-import type { HueAnalysis, Rgb, SonosTime } from "@/lib/api/types";
+import type { ChannelPosition, HueAnalysis, Rgb, SonosTime } from "@/lib/api/types";
 
 // ---------------------------------------------------------------------------
 // The clock
@@ -150,6 +150,50 @@ export const BEAT_LIFT = 0.6;
  */
 export const BEAT_WASH = 0.5;
 
+/**
+ * How far the whole room can be spread along the hue arc, in degrees.
+ *
+ * The arc's full width, so the extreme of the slider is the honest one: the
+ * room shows the entire palette at once. It is also the setting at which the
+ * arc reduction below leaves the music no room to move, which is a real cost
+ * the user can see rather than a limit invented to hide one.
+ */
+export const SPREAD_MAX_DEG = HUE_MAX_DEG - HUE_MIN_DEG;
+
+/**
+ * The dimmest the brightness slider goes, as a fraction of full.
+ *
+ * Not zero, for the same reason `MIN_VALUE` is not zero — and it has to hold
+ * against the *quietest* passage, not the average one, since `MIN_VALUE * this`
+ * is what a silent intro renders at. At 0.15 that is still a couple of 8-bit
+ * steps above black, so the lamp is visibly on. Anyone who wants the lights off
+ * has a Stop button that says so.
+ */
+export const BRIGHTNESS_FLOOR = 0.15;
+
+/**
+ * The ends of the beat-decay range the transition slider sweeps.
+ *
+ * `DECAY_MIN` is a strobe-ish tick that is gone well before the next beat;
+ * `DECAY_MAX` still has a third of the flash left when the next one lands, so
+ * the room glows rather than blinks. `BEAT_DECAY_FRACTION` sits exactly at the
+ * default slider position, so the shipped look is the one the tests above have
+ * always described.
+ */
+export const DECAY_MIN = 0.15;
+export const DECAY_MAX = 0.95;
+
+/**
+ * The ends of the colour-slew time constant, in seconds.
+ *
+ * `TAU_MIN_SECONDS` is short enough that a whole second of `dt` — what a
+ * throttled background tab hands the loop — arrives as a snap rather than a
+ * fade, which is what "no smoothing" has to mean when the loop cannot promise
+ * to run. `TAU_MAX_SECONDS` is a slow wash that ignores beats entirely.
+ */
+export const TAU_MIN_SECONDS = 0.05;
+export const TAU_MAX_SECONDS = 2;
+
 /** Guards the decay against a degenerate sidecar with two beats at one instant. */
 const MIN_BEAT_PERIOD_SECONDS = 0.05;
 
@@ -232,6 +276,41 @@ export function hsvToRgb(h: number, s: number, v: number): Rgb {
 }
 
 /**
+ * The room's colour for one instant, before it is split across the lights.
+ *
+ * HSV rather than RGB because the spread is a rotation of `hue`, and recovering
+ * a hue from three 8-bit numbers to rotate it would lose the precision the
+ * rotation needs — 280° across a handful of lamps is a few degrees each.
+ */
+export interface Frame {
+  /** Degrees, already inside the arc with room for `spreadDeg` on both sides. */
+  hue: number;
+  saturation: number;
+  value: number;
+}
+
+/**
+ * The user's dials, in the units the palette works in.
+ *
+ * Every field is optional and defaults to the constant the palette shipped
+ * with, so an unparameterised call renders exactly what it rendered before
+ * these existed. `resolveSettings` turns slider positions into these.
+ */
+export interface PaletteOptions {
+  /** Multiplies the final value. `BRIGHTNESS_FLOOR`..1. */
+  brightness?: number;
+  /** Beat flash decay as a fraction of the beat period. See `BEAT_DECAY_FRACTION`. */
+  beatDecay?: number;
+  /**
+   * Total hue spread across the room, in degrees. The palette needs it even
+   * though it does not apply it: the base hue has to be computed into an arc
+   * narrowed by half a spread at each end, or the outermost lights would be
+   * rotated off the arc and wrap into the reds `HUE_MAX_DEG` exists to avoid.
+   */
+  spreadDeg?: number;
+}
+
+/**
  * A track's palette, with the per-track normalisation already done.
  *
  * Built once per song rather than per frame: it sorts the whole brightness
@@ -239,8 +318,10 @@ export function hsvToRgb(h: number, s: number, v: number): Rgb {
  * absurd fifteen times a second.
  */
 export interface Renderer {
-  /** The colour for `t` seconds into the track. Total: any `t` is answerable. */
-  colorAt(t: number): Rgb;
+  /** The room's colour at `t` seconds into the track. Total: any `t` is answerable. */
+  frameAt(t: number, options?: PaletteOptions): Frame;
+  /** `frameAt` through `hsvToRgb`, for callers with one lamp or none. */
+  colorAt(t: number, options?: PaletteOptions): Rgb;
   /** Normalised timbre bounds, for the debug readout. */
   readonly brightnessRange: readonly [number, number];
 }
@@ -280,32 +361,142 @@ export function createRenderer(analysis: HueAnalysis): Renderer {
 
   const fallbackPeriod = analysis.tempo > 0 ? 60 / analysis.tempo : 0.5;
 
-  function pulseAt(t: number): number {
+  function pulseAt(t: number, beatDecay: number): number {
     const i = lastBeatIndex(beats, t);
     if (i < 0) return 0;
     const period = i > 0 ? beats[i] - beats[i - 1] : fallbackPeriod;
-    const decay = Math.max(period, MIN_BEAT_PERIOD_SECONDS) * BEAT_DECAY_FRACTION;
+    const decay = Math.max(period, MIN_BEAT_PERIOD_SECONDS) * beatDecay;
     return Math.exp(-(t - beats[i]) / decay);
+  }
+
+  function frameAt(t: number, options: PaletteOptions = {}): Frame {
+    const {
+      brightness: gain = 1,
+      beatDecay = BEAT_DECAY_FRACTION,
+      spreadDeg = 0,
+    } = options;
+
+    const loudness = clamp01(sample(energy, frameSeconds, t));
+    const timbre = clamp01((sample(brightness, frameSeconds, t) - lo) / span);
+    const pulse = pulseAt(t, beatDecay);
+
+    /*
+     * The arc reduction.
+     *
+     * `spreadAcross` rotates the outermost lights by ±spreadDeg/2, so the base
+     * hue is computed into an arc with that much shaved off each end. Skip it
+     * and the top of the range plus half a spread lands past 280° in the
+     * magenta-to-red return, where a bright timbre reads as a dark one — the
+     * exact wrap `HUE_MAX_DEG` was chosen to avoid.
+     *
+     * At the widest setting the two ends meet and the base hue is pinned to the
+     * middle of the arc: the room shows the whole palette at once and stops
+     * following the music. That is the honest reading of the request, not a
+     * bug, and the slider's label is where to argue with it.
+     */
+    const margin = Math.min(Math.max(spreadDeg, 0), SPREAD_MAX_DEG) / 2;
+    const low = HUE_MIN_DEG + margin;
+    const high = HUE_MAX_DEG - margin;
+    const hue = low + (high - low) * timbre;
+
+    const base = MIN_VALUE + (1 - MIN_VALUE) * loudness;
+
+    return {
+      hue,
+      saturation: BASE_SATURATION * (1 - pulse * BEAT_WASH),
+      // Brightness scales the finished value rather than capping it, so a quiet
+      // passage and a chorus stay as far apart in relative terms as they were.
+      // Capping would squash the range from the top while MIN_VALUE held the
+      // floor, and a dim room would stop following the music altogether.
+      value: clamp01(base + (1 - base) * pulse * BEAT_LIFT) * gain,
+    };
   }
 
   return {
     brightnessRange: [lo, hi] as const,
-
-    colorAt(t: number): Rgb {
-      const loudness = clamp01(sample(energy, frameSeconds, t));
-      const timbre = clamp01((sample(brightness, frameSeconds, t) - lo) / span);
-      const pulse = pulseAt(t);
-
-      const hue = HUE_MIN_DEG + (HUE_MAX_DEG - HUE_MIN_DEG) * timbre;
-      const base = MIN_VALUE + (1 - MIN_VALUE) * loudness;
-
-      return hsvToRgb(
-        hue,
-        BASE_SATURATION * (1 - pulse * BEAT_WASH),
-        base + (1 - base) * pulse * BEAT_LIFT,
-      );
+    frameAt,
+    colorAt(t: number, options?: PaletteOptions): Rgb {
+      const frame = frameAt(t, options);
+      return hsvToRgb(frame.hue, frame.saturation, frame.value);
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// The spread
+// ---------------------------------------------------------------------------
+
+/** Below this the room's lights are, for ordering purposes, in the same place. */
+const POSITION_EPSILON = 1e-6;
+
+/**
+ * The order to lay the gradient out in: one end of the room to the other.
+ *
+ * Ordered along whichever of x/y the lights are more spread out on, because a
+ * gradient run across a room's narrow axis puts its two extremes a metre apart
+ * and reads as no gradient at all. `z` is ignored — lamps sit at roughly one
+ * height and a vertical gradient across a 10cm spread is noise.
+ *
+ * Falls back to ascending channel id whenever the positions cannot answer:
+ * nobody configured them (the common case — it is a manual step in the Hue app
+ * that most people never take), or one lamp is missing one. All-or-nothing on
+ * purpose: a partial ranking would drop the unpositioned lamp at an arbitrary
+ * point inside an otherwise meaningful gradient, which looks like a bug, where
+ * an arbitrary *whole* order just looks like a room.
+ */
+export function orderChannels(
+  channels: number[],
+  positions: Record<string, ChannelPosition | null>,
+): number[] {
+  const byId = [...channels].sort((a, b) => a - b);
+  if (byId.length <= 1) return byId;
+
+  const placed = byId.map((id) => positions[String(id)]);
+  if (placed.some((p) => !p)) return byId;
+  const known = placed as ChannelPosition[];
+
+  const spanOf = (axis: "x" | "y") => {
+    const values = known.map((p) => p[axis]);
+    return Math.max(...values) - Math.min(...values);
+  };
+  const spanX = spanOf("x");
+  const spanY = spanOf("y");
+  if (!(Math.max(spanX, spanY) > POSITION_EPSILON)) return byId;
+
+  const axis = spanX >= spanY ? "x" : "y";
+  return byId
+    .map((id, i) => ({ id, along: known[i][axis] }))
+    // Ties broken by id, which `byId` already gives us and a stable sort keeps.
+    .sort((a, b) => a.along - b.along)
+    .map((entry) => entry.id);
+}
+
+/**
+ * One room colour, fanned out along the hue arc across the ordered lights.
+ *
+ * The rotation is a *gradient of one mood*, not a different colour per lamp:
+ * the ends are `spreadDeg` apart and everything between is interpolated, so the
+ * room still reads as one scene with depth rather than as a disco. `frameAt`
+ * has already narrowed the arc by `spreadDeg`, so no offset here can wrap.
+ *
+ * Keys are stringified channel ids because that is what goes over JSON and what
+ * the backend's `int(k)` reads back.
+ */
+export function spreadAcross(
+  frame: Frame,
+  ordered: number[],
+  spreadDeg: number,
+): Record<string, Rgb> {
+  const colors: Record<string, Rgb> = {};
+  const last = ordered.length - 1;
+  for (let i = 0; i <= last; i += 1) {
+    // A lone light sits at the middle of the gradient, so it gets the room
+    // colour unshifted without needing a branch for it.
+    const rank = last === 0 ? 0.5 : i / last;
+    const hue = frame.hue + (rank - 0.5) * spreadDeg;
+    colors[String(ordered[i])] = hsvToRgb(hue, frame.saturation, frame.value);
+  }
+  return colors;
 }
 
 // ---------------------------------------------------------------------------
@@ -341,4 +532,149 @@ export function differsEnough(a: Rgb, b: Rgb, epsilon = COLOR_EPSILON): boolean 
     Math.abs(a[1] - b[1]) >= epsilon ||
     Math.abs(a[2] - b[2]) >= epsilon
   );
+}
+
+/**
+ * The same question for a whole room.
+ *
+ * All-or-nothing, because the datagram is: one frame carries every channel, so
+ * a single lamp needing an update means the whole frame is worth sending. A
+ * changed channel *set* counts too — a lamp joining or leaving changes what the
+ * frame addresses even when every colour in it is within epsilon, and the
+ * backend fills anything unlisted with black.
+ */
+export function anyDiffersEnough(
+  next: Record<string, Rgb>,
+  last: Record<string, Rgb> | null,
+  epsilon = COLOR_EPSILON,
+): boolean {
+  if (last === null) return true;
+  const keys = Object.keys(next);
+  if (keys.length !== Object.keys(last).length) return true;
+  for (const key of keys) {
+    const before = last[key];
+    if (before === undefined) return true;
+    if (differsEnough(next[key], before, epsilon)) return true;
+  }
+  return false;
+}
+
+/**
+ * One step of an exponential approach from `prev` to `target`.
+ *
+ * Parameterised by a time constant and the elapsed time rather than by a
+ * per-tick fraction, which is the whole reason this is not a one-liner. The
+ * send loop is a `setInterval` and a hidden tab throttles it to about 1 Hz — and
+ * a tab playing music through a speaker in another room is hidden nearly all of
+ * the time. A fixed fraction per tick would smooth a backgrounded tab twenty
+ * times harder than a visible one, so the lights would turn sluggish exactly
+ * when nobody was looking at the thing that explained why.
+ *
+ * Returns floats. Rounding here would be the bug: under heavy smoothing a tick
+ * can move a channel by less than half a unit, which rounds straight back to
+ * where it started and freezes the room on a stale setpoint forever. The caller
+ * keeps this state and rounds once, at the point of sending, with `roundRgb`.
+ */
+export function easeToward(
+  prev: Rgb,
+  target: Rgb,
+  dtSeconds: number,
+  tauSeconds: number,
+): Rgb {
+  const alpha =
+    tauSeconds > 0 && dtSeconds > 0 ? 1 - Math.exp(-dtSeconds / tauSeconds) : 1;
+  return [
+    prev[0] + (target[0] - prev[0]) * alpha,
+    prev[1] + (target[1] - prev[1]) * alpha,
+    prev[2] + (target[2] - prev[2]) * alpha,
+  ];
+}
+
+/**
+ * `easeToward` across the room, keyed by channel.
+ *
+ * The target's channel set wins: a lamp that has left the area is dropped
+ * rather than carried, and one that has just joined eases up from `IDLE_COLOR`
+ * — the colour the room rests at — so it fades in with the others instead of
+ * snapping to full or rising out of black.
+ */
+export function easeChannels(
+  prev: Record<string, Rgb> | null,
+  target: Record<string, Rgb>,
+  dtSeconds: number,
+  tauSeconds: number,
+): Record<string, Rgb> {
+  const next: Record<string, Rgb> = {};
+  for (const key of Object.keys(target)) {
+    next[key] = easeToward(prev?.[key] ?? IDLE_COLOR, target[key], dtSeconds, tauSeconds);
+  }
+  return next;
+}
+
+/** The eased float state, as the 8-bit triple the bridge is actually sent. */
+export function roundRgb(rgb: Rgb): Rgb {
+  return [Math.round(rgb[0]), Math.round(rgb[1]), Math.round(rgb[2])];
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+/**
+ * The three sliders, as the UI holds them: 0..100, which is what a slider is
+ * and what survives `localStorage` without a migration when the ranges below
+ * are retuned.
+ */
+export interface HueSettings {
+  brightness: number;
+  /** Drives both the colour slew and the beat decay. See `resolveSettings`. */
+  transition: number;
+  spread: number;
+}
+
+/** The same three, in the units `PaletteOptions` and `easeToward` want. */
+export interface ResolvedSettings {
+  brightness: number;
+  beatDecay: number;
+  spreadDeg: number;
+  tauSeconds: number;
+}
+
+/**
+ * Where the sliders start.
+ *
+ * Full brightness and today's decay, so an existing user sees no change they
+ * did not ask for; a narrow spread, so the feature announces itself as depth in
+ * the room rather than as a light show someone forgot to turn off.
+ */
+export const DEFAULT_SETTINGS: HueSettings = { brightness: 100, transition: 25, spread: 15 };
+
+const position = (value: number) =>
+  Number.isFinite(value) ? Math.min(Math.max(value, 0), 100) / 100 : 0;
+
+/**
+ * Slider positions to palette units.
+ *
+ * `transition` drives two things at once because they are one perception: a
+ * user who slows the colour slew and leaves the beats snapping gets a room that
+ * looks like two effects fighting. Slew is geometric between its ends — the
+ * felt difference between 0.05s and 0.15s is the same as between 0.7s and 2s,
+ * and a linear slider would spend most of its travel in territory nobody wants.
+ * Decay is linear, and `BEAT_DECAY_FRACTION` falls exactly on the default.
+ *
+ * Clamps, because `usePersistedState` hands back whatever parsed out of
+ * `localStorage`: a hand-edited or stale key must not produce a negative time
+ * constant or a spread that pushes hues off the arc.
+ */
+export function resolveSettings(settings: HueSettings): ResolvedSettings {
+  const brightness = position(settings.brightness);
+  const transition = position(settings.transition);
+  const spread = position(settings.spread);
+
+  return {
+    brightness: BRIGHTNESS_FLOOR + (1 - BRIGHTNESS_FLOOR) * brightness,
+    beatDecay: DECAY_MIN + (DECAY_MAX - DECAY_MIN) * transition,
+    spreadDeg: SPREAD_MAX_DEG * spread,
+    tauSeconds: TAU_MIN_SECONDS * (TAU_MAX_SECONDS / TAU_MIN_SECONDS) ** transition,
+  };
 }

@@ -12,11 +12,13 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Slider } from "@/components/ui/slider";
 import type { HueArea, HueBridge, NowPlaying, Rgb } from "@/lib/api/types";
 import { describeArea, describeBridge, describeHue, type HueTone } from "@/lib/hue-bridge";
 import { useErrorToast } from "@/lib/hooks/use-error-toast";
 import { useHue, type HueState } from "@/lib/hooks/use-hue";
 import { useHueRender, type AnalysisStatus } from "@/lib/hooks/use-hue-render";
+import { useHueSettings, type HueSettingsState } from "@/lib/hooks/use-hue-settings";
 import { cn } from "@/lib/utils";
 
 export interface HueDialogProps {
@@ -42,11 +44,16 @@ export interface HueDialogProps {
 export function HueDialog({ nowPlaying }: HueDialogProps) {
   const [open, setOpen] = useState(false);
   const hue = useHue();
+  const dials = useHueSettings();
 
-  const { status, color } = useHueRender({
+  const { status, colors } = useHueRender({
     nowPlaying,
     streaming: hue.streaming,
     preview: open,
+    // The area, not just its id: the loop lays the gradient out along the
+    // channel list and whatever positions the bridge knows for them.
+    area: hue.area,
+    settings: dials.resolved,
     onStreamLost: hue.reportStreamLost,
   });
 
@@ -131,9 +138,10 @@ export function HueDialog({ nowPlaying }: HueDialogProps) {
 
         <div className="thin-scrollbar flex min-h-0 flex-col gap-2.5 overflow-y-auto pr-1.5">
           {paired ? <AreaList hue={hue} /> : <BridgeList hue={hue} />}
+          {paired && <LightSettings dials={dials} />}
         </div>
 
-        {paired && <StreamControls hue={hue} status={status} color={color} />}
+        {paired && <StreamControls hue={hue} status={status} colors={colors} />}
       </DialogContent>
     </Dialog>
   );
@@ -303,6 +311,87 @@ function AreaCard({
 }
 
 // ---------------------------------------------------------------------------
+// The dials
+// ---------------------------------------------------------------------------
+
+/**
+ * The three things about the light show a listener can change.
+ *
+ * Enabled while streaming, unlike the area rows above — which are disabled
+ * because picking an area mid-stream would store a preference and change
+ * nothing visible. These are the opposite case: taking effect on the next tick
+ * is the entire point, and a slider you can only move with the lights off is a
+ * slider you have to guess the setting of.
+ *
+ * "Smoothing" rather than the "transition speed" this started as, because the
+ * scale is inverted from what a speed would imply: more of it means slower
+ * colour changes and longer beat flashes, and a control labelled speed that
+ * slows things down as it goes up is a bug report waiting to happen.
+ */
+function LightSettings({ dials }: { dials: HueSettingsState }) {
+  const { settings } = dials;
+
+  return (
+    <div className="mt-0.5 flex flex-col gap-1 rounded-xl border border-border bg-card px-[0.85rem] py-2">
+      <Dial label="Brightness" value={settings.brightness} onChange={dials.setBrightness} />
+      <Dial label="Smoothing" value={settings.transition} onChange={dials.setTransition} />
+      <Dial label="Spread" value={settings.spread} onChange={dials.setSpread} />
+    </div>
+  );
+}
+
+function Dial({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (position: number) => void;
+}) {
+  return (
+    <div className="flex items-center gap-3">
+      {/*
+       * `aria-hidden`, with the same word on the slider's own `aria-label`:
+       * the text is a visual label for a control that already announces its
+       * name and value, and leaving it exposed reads the word twice.
+       */}
+      <span aria-hidden className="w-[5.5rem] shrink-0 text-[0.8rem] text-muted-foreground">
+        {label}
+      </span>
+      {/* `h-9` on the wrapper for the same reason as the volume panel: the
+          track is 6px and the thumb 18px, and the row is what you actually
+          hit on a touch screen. */}
+      <div className="flex h-9 grow items-center">
+        <Slider
+          aria-label={label}
+          value={[value]}
+          min={0}
+          max={100}
+          step={1}
+          onValueChange={([next]) => onChange(next)}
+          className={DIAL_CLASS}
+        />
+      </div>
+      <span
+        aria-hidden
+        className="min-w-[3ch] text-right text-[0.8rem] font-semibold tabular-nums text-gold"
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/** The volume slider's treatment, on a smaller thumb — three of these stack. */
+const DIAL_CLASS = cn(
+  "[&_[data-slot=slider-track]]:h-1.5 [&_[data-slot=slider-track]]:bg-white/10",
+  "[&_[data-slot=slider-range]]:bg-gold",
+  "[&_[data-slot=slider-thumb]]:size-[18px] [&_[data-slot=slider-thumb]]:border-[3px] [&_[data-slot=slider-thumb]]:border-card [&_[data-slot=slider-thumb]]:bg-gold",
+  "[&_[data-slot=slider-thumb]]:shadow-[0_0_10px_rgba(212,175,55,0.4)] [&_[data-slot=slider-thumb]]:hover:scale-110",
+);
+
+// ---------------------------------------------------------------------------
 // The stream
 // ---------------------------------------------------------------------------
 
@@ -324,17 +413,17 @@ const ANALYSIS_NOTE: Record<AnalysisStatus, string> = {
 function StreamControls({
   hue,
   status,
-  color,
+  colors,
 }: {
   hue: HueState;
   status: AnalysisStatus;
-  color: Rgb | null;
+  colors: Rgb[] | null;
 }) {
   const ready = hue.area ? describeArea(hue.area, hue.health).ready : false;
 
   return (
     <div className="mt-4 flex shrink-0 items-center gap-3 border-t border-border pt-4">
-      <Swatch color={color} streaming={hue.streaming} />
+      <SwatchStrip colors={colors} streaming={hue.streaming} />
 
       <span className="min-w-0 flex-1 truncate text-[0.82rem] text-muted-foreground">
         {hue.streaming ? ANALYSIS_NOTE[status] : "Lights are not following"}
@@ -357,31 +446,49 @@ function StreamControls({
 }
 
 /**
- * The colour on its way to the bridge.
+ * The colours on their way to the bridge — one segment per light, in room
+ * order.
  *
- * Not `aria-live`, and the label does not change with the colour: it updates
- * four times a second and any announcement of it would be a stream of noise.
- * The sentence beside it is what carries the state to a screen reader.
+ * A strip rather than a single dot because with the spread dialled up there is
+ * no single colour being sent, and averaging them would hide the one thing the
+ * readout exists to show. It also makes the spread slider legible without a
+ * bridge in the room.
+ *
+ * Not `aria-live`, and no label changes with the colour: it updates four times
+ * a second and any announcement of it would be a stream of noise. The sentence
+ * beside it is what carries the state to a screen reader.
  */
-function Swatch({ color, streaming }: { color: Rgb | null; streaming: boolean }) {
+function SwatchStrip({ colors, streaming }: { colors: Rgb[] | null; streaming: boolean }) {
+  // `[null]` and not an early return: an idle stream and a one-lamp room are
+  // the same shape on screen, and the glow is the only thing that differs.
+  const lights: (Rgb | null)[] = colors && colors.length > 0 ? colors : [null];
+  const glow = lights[Math.floor(lights.length / 2)];
+
   return (
     <span
       aria-hidden
       className={cn(
-        "size-9 shrink-0 rounded-full border transition-colors duration-200",
+        "flex h-9 shrink-0 overflow-hidden rounded-full border transition-colors duration-200",
+        lights.length > 1 ? "w-16" : "w-9",
         streaming ? "border-white/20" : "border-border bg-white/5",
       )}
-      style={
-        color
-          ? {
-              backgroundColor: `rgb(${color[0]} ${color[1]} ${color[2]})`,
-              boxShadow: `0 0 14px rgb(${color[0]} ${color[1]} ${color[2]} / 0.5)`,
-            }
-          : undefined
-      }
-    />
+      style={glow ? { boxShadow: `0 0 14px ${rgb(glow, 0.5)}` } : undefined}
+    >
+      {lights.map((color, i) => (
+        <span
+          // Index, deliberately: the segments are positions in the room, not
+          // identities, and the list only changes length when the area does.
+          key={i}
+          className="h-full flex-1"
+          style={color ? { backgroundColor: rgb(color) } : undefined}
+        />
+      ))}
+    </span>
   );
 }
+
+const rgb = ([r, g, b]: Rgb, alpha?: number) =>
+  alpha === undefined ? `rgb(${r} ${g} ${b})` : `rgb(${r} ${g} ${b} / ${alpha})`;
 
 // ---------------------------------------------------------------------------
 
