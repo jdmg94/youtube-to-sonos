@@ -261,6 +261,12 @@ They stay **enabled while streaming**, unlike the area rows, which are disabled
 because selecting an area mid-stream would be a silent no-op. These are the
 opposite case: taking effect live is the entire point.
 
+The transition slider is **labelled "Smoothing"**, not "Transition" — its scale
+is inverted from what the word implies, since more of it means slower colour
+changes and longer beat flashes. A control called speed that slows things down
+as it goes up is a bug report waiting to happen. The internal name stays
+`transition`.
+
 `Swatch` becomes `SwatchStrip` — one pill per channel in room order, so the
 readout shows what is actually being sent rather than a colour no single lamp is
 displaying. Still `aria-hidden`; it is decoration, and the status line beside it
