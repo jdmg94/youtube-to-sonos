@@ -54,6 +54,10 @@ DISCOVER_TIMEOUT = float(os.environ.get('HUE_DISCOVER_TIMEOUT', 5))
 FRAME_HZ = float(os.environ.get('HUE_FRAME_HZ', 25))
 FRAME_INTERVAL = 1.0 / FRAME_HZ
 HANDSHAKE_TIMEOUT = float(os.environ.get('HUE_HANDSHAKE_TIMEOUT', 5))
+# Putting the lamps back happens on the thread that asked to stop, one PUT per
+# lamp, so the full HTTP_TIMEOUT would let an unreachable bridge hold a Stop
+# open for ten seconds times the size of the room.
+RESTORE_TIMEOUT = float(os.environ.get('HUE_RESTORE_TIMEOUT', 3))
 # How long to keep polling POST /api while the user walks to the bridge.
 PAIR_WINDOW = float(os.environ.get('HUE_PAIR_WINDOW', 60))
 PAIR_POLL_INTERVAL = 2.0
@@ -311,10 +315,11 @@ class BridgeClient:
             raise HueError("No Hue bridge paired yet", status=409)
         return cls(state['ip'], state['username'])
 
-    def request(self, method, path, **kw):
+    def request(self, method, path, timeout=None, **kw):
         url = f"https://{self.ip}/clip/v2/resource/{path}"
         try:
-            r = self._session.request(method, url, timeout=HTTP_TIMEOUT, **kw)
+            r = self._session.request(method, url,
+                                      timeout=timeout or HTTP_TIMEOUT, **kw)
         except requests.RequestException as e:
             raise HueError(f"Bridge at {self.ip} unreachable: {e}") from e
         if r.status_code == 401 or r.status_code == 403:
@@ -335,8 +340,8 @@ class BridgeClient:
     def get(self, path):
         return self.request('get', path).get('data', [])
 
-    def put(self, path, payload):
-        return self.request('put', path, json=payload)
+    def put(self, path, payload, timeout=None):
+        return self.request('put', path, json=payload, timeout=timeout)
 
     # -- resources
 
@@ -386,6 +391,121 @@ class BridgeClient:
     def set_area_action(self, area_id, action):
         return self.put(f"entertainment_configuration/{area_id}",
                         {'action': action})
+
+    # -- restore
+
+    def area_snapshot(self, area_id):
+        """Raw light resources for the lamps in an area, as they are right now.
+
+        Three list calls rather than one per lamp: `GET /light` already returns
+        every light's full state, so the cost of a snapshot does not grow with
+        the size of the area.
+        """
+        area = next((it for it in self.get('entertainment_configuration')
+                     if it.get('id') == area_id), None)
+        if area is None:
+            return []
+        lights = self.get('light')
+        by_id = {it['id']: it for it in lights}
+        ids = area_light_ids(area, self.get('entertainment'), lights)
+        return [by_id[i] for i in ids if i in by_id]
+
+    def restore_lights(self, snapshot):
+        """Put each lamp back. Best-effort, and deliberately so.
+
+        The caller has already stopped the stream and answered its own request;
+        one unreachable lamp is not a reason to abandon the rest of the room.
+
+        Sequential, on the caller's thread, with a short timeout: on a LAN each
+        PUT is tens of milliseconds, and the timeout only bites when the bridge
+        is already gone — at which point every lamp will fail and the cap on the
+        damage is what matters.
+        """
+        for light in snapshot:
+            try:
+                self.put(f"light/{light['id']}", restore_payload(light),
+                         timeout=RESTORE_TIMEOUT)
+            except Exception as e:
+                logger.warning(f"Hue: could not restore light "
+                               f"{light.get('id')}: {e}")
+
+
+# --- putting the lamps back --------------------------------------------------
+
+def area_light_ids(area, services, lights):
+    """The lights an entertainment area covers, in channel order, deduped.
+
+    The bridge never states this. An area lists *channels*, a channel lists the
+    `entertainment` services feeding it, and an entertainment service and a
+    light are two services of the same device — so the device is the join, and
+    it takes three list calls to walk it.
+
+    An unrecognised shape returns nothing. The tempting fallback is every light
+    on the bridge, but that reaches into rooms the show never touched; a restore
+    that does nothing is a missing feature, and one that guesses is a bug in
+    someone else's kitchen.
+    """
+    device_of = {s['id']: (s.get('owner') or {}).get('rid') for s in services}
+    of_device = {}
+    for it in lights:
+        owner = (it.get('owner') or {}).get('rid')
+        if owner:
+            of_device.setdefault(owner, []).append(it['id'])
+
+    ids = []
+    for channel in area.get('channels') or []:
+        for member in channel.get('members') or []:
+            service = member.get('service') or {}
+            if service.get('rtype') != 'entertainment':
+                continue
+            # A gradient strip is several channels on one device, which is the
+            # normal case rather than the corner one.
+            for light_id in of_device.get(device_of.get(service.get('rid')), ()):
+                if light_id not in ids:
+                    ids.append(light_id)
+    if ids:
+        return ids
+
+    # Older firmware answers with bare channels and a flat `light_services`.
+    # Cheap to honour, and the alternative is restoring nothing on a bridge
+    # that streams perfectly well.
+    known = {it['id'] for it in lights}
+    for service in area.get('light_services') or []:
+        light_id = service.get('rid')
+        if light_id in known and light_id not in ids:
+            ids.append(light_id)
+    return ids
+
+
+def restore_payload(snapshot):
+    """What to PUT at one light to put it back where the show found it.
+
+    Only the keys the bridge reported: a white-only bulb has no `color` and a
+    smart plug has no `dimming`, and sending either is a 400 rather than a
+    harmless no-op.
+    """
+    on = bool((snapshot.get('on') or {}).get('on'))
+    payload = {'on': {'on': on}}
+    if not on:
+        # Nothing else. A lamp the show has been driving is lit, and handing it
+        # a colour in the same breath as `on: false` is a visible blink on the
+        # way out — it gets its colour back next time someone turns it on.
+        return payload
+
+    brightness = (snapshot.get('dimming') or {}).get('brightness')
+    if brightness is not None:
+        payload['dimming'] = {'brightness': brightness}
+
+    # `mirek` is non-null only while the lamp is actually showing white. A
+    # colour lamp keeps its last xy underneath that, so preferring xy here is
+    # how a restore quietly turns a warm-white room pink.
+    mirek = (snapshot.get('color_temperature') or {}).get('mirek')
+    xy = (snapshot.get('color') or {}).get('xy')
+    if mirek is not None:
+        payload['color_temperature'] = {'mirek': mirek}
+    elif xy is not None:
+        payload['color'] = dict(xy=dict(xy))
+    return payload
 
 
 # --- the Entertainment stream ------------------------------------------------
@@ -469,6 +589,9 @@ class HueSession:
         self._colors = {}
         self._sequence = 0
         self.error = None
+        # How the room looked before we took it over, taken at `start()` and
+        # spent at `stop()`.
+        self._restore = None
 
     # -- lifecycle
 
@@ -480,6 +603,11 @@ class HueSession:
             return self
         self._stop.clear()
         self.error = None
+        # Before the area goes live, while the lamps still hold whatever the
+        # listener left them on. Once it is streaming the bridge reports the
+        # frames we are sending, so a snapshot taken later records the light
+        # show and "restores" the room to it.
+        self._restore = self._snapshot()
         self.client.set_area_action(self.area_id, 'start')
         try:
             self._socket, self.profile = self._connect()
@@ -487,6 +615,9 @@ class HueSession:
             # Leaving the bridge in "streaming" with nobody streaming locks the
             # area out of normal control until it times out.
             self._safe_area_action('stop')
+            # Activating an area lights its lamps before a single frame is
+            # sent, so a start that got this far has still changed the room.
+            self._restore_now()
             raise
         self._thread = threading.Thread(target=self._writer,
                                         name=f"hue-{self.area_id[:8]}",
@@ -505,13 +636,43 @@ class HueSession:
             except Exception:
                 pass
             self._socket = None
+        # Deactivate first: a light in a streaming area ignores REST, so a
+        # restore sent before this one lands on nothing — a no-op that reads as
+        # correct in the code and as broken from the sofa.
         self._safe_area_action('stop')
+        self._restore_now()
 
     def _safe_area_action(self, action):
         try:
             self.client.set_area_action(self.area_id, action)
         except Exception as e:
             logger.warning(f"Hue area {self.area_id} {action} failed: {e}")
+
+    # -- putting the room back
+
+    def _snapshot(self):
+        """The room as we found it, or nothing if we could not read it.
+
+        Never raises: failing to record the old colours is a reason to skip the
+        restore, not a reason to refuse to run the light show.
+        """
+        try:
+            return self.client.area_snapshot(self.area_id)
+        except Exception as e:
+            logger.warning(f"Hue: no snapshot of area {self.area_id}; lamps "
+                           f"will stay where the show leaves them: {e}")
+            return []
+
+    def _restore_now(self):
+        """Spend the snapshot, once.
+
+        Cleared as it is taken, so a second `stop()` — and both the dialog's
+        button and /api/stop can reach one — cannot re-apply a room that is by
+        then hours out of date.
+        """
+        snapshot, self._restore = self._restore, None
+        if snapshot:
+            self.client.restore_lights(snapshot)
 
     # -- colour
 

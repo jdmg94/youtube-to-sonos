@@ -34,7 +34,15 @@ pnpm lint           # eslint, incl. React Compiler rules
 pnpm build          # production build (output: standalone, for Docker)
 ```
 
-The backend still has no tests or linters. The frontend has all four gates above and they are expected to stay green.
+The backend has no linters and one test file:
+
+```bash
+.venv/bin/python -m unittest test_hue   # stdlib unittest, no config, no new dependency
+```
+
+`test_hue.py` covers only the parts of `hue.py` that can be checked without a bridge — turning bridge JSON into "which lamps" and "what to say to them", and the order `HueSession` does things in. The rest of the backend is untested; DTLS handshakes and SSDP are hardware. Adding a second file means `python -m unittest discover` and nothing else.
+
+The frontend has all four gates above and they are expected to stay green.
 
 Notes on ports:
 
@@ -182,6 +190,12 @@ Lights that follow the music. Discovery (mDNS `_hue._tcp.local`, cloud fallback)
 Two things worth not re-deriving: the writer thread **always sends** rather than sending on change, because the bridge drops a stream idle for ~10s and this makes keepalive fall out of the frame loop for free; and a frame is **one datagram carrying every channel** at full 16-bit colour, where pykit sends one datagram per light and hue-sync duplicates each 8-bit value into both bytes.
 
 `/api/hue/health` deliberately does **not** take `_HUE_LOCK` — starting a stream holds it across an HTTPS PUT and up to four DTLS handshakes, and health blocking behind that would stall the UI exactly while it asks whether the stream came up.
+
+**Stopping restores the room, because the bridge doesn't.** Deactivating an entertainment area hands control back but leaves the lamps wherever the last frame painted them, so `HueSession.start` snapshots the area's lights and `stop` re-applies that snapshot. Two orderings are load-bearing and both fail silently if reversed: the snapshot is taken **before** the area goes live (afterwards the bridge reports the frames we are sending, so the snapshot would record the light show), and the restore is sent **after** deactivating (a light in a streaming area ignores REST, so the PUTs would land on nothing). `test_hue.py` pins both.
+
+It lives in `HueSession.stop()` rather than the endpoint, so every teardown gets it: the dialog's Stop, `/api/stop`, switching areas, and a handshake that fails after the area was activated. `_hue_stop()` in `app.py` is the one place `_HUE_SESSION` is torn down, shared by the stream endpoint and `/api/stop` so the two cannot drift — which is why the stream endpoint's stop branch sits *outside* `with _HUE_LOCK` now, as `_hue_stop` takes that lock itself and it is not reentrant.
+
+Which lamps an area covers takes three list calls to work out: an area lists channels, a channel lists the `entertainment` services feeding it, and an entertainment service and a light are two services of one device. `area_light_ids` does that join and returns **nothing** when the shape is unrecognised — falling back to every light on the bridge would put someone's kitchen back to a state the show never touched.
 
 ### Beat analysis (`analysis.py`)
 

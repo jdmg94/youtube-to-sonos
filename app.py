@@ -2460,6 +2460,11 @@ def stop():
         _coordinator(speaker).stop()
         # Tear down the station so it stops prefetching from YouTube.
         end_station(speaker.ip_address)
+        # The show is over, so hand the lamps back the way we found them. There
+        # is one light stream per process and it is not bound to a speaker, so
+        # stopping any speaker ends it — invisible with one bridge and one
+        # household, which is the only arrangement the single session supports.
+        _hue_stop()
         return jsonify({"status": "stopped", "device": speaker.player_name})
     except Exception as e:
         logger.error(f"Stop command failed: {e}")
@@ -2684,6 +2689,27 @@ _HUE_SESSION = None
 _HUE_LOCK = threading.Lock()
 
 
+def _hue_stop():
+    """Tear the light stream down if one is up, putting the lamps back.
+
+    Never raises. Both callers are reporting on something else — one on a Stop
+    the listener pressed in the Hue dialog, the other on stopping the music —
+    and neither should become a 500 because a lamp was unplugged.
+
+    Returns whether there was anything to stop.
+    """
+    global _HUE_SESSION
+    with _HUE_LOCK:
+        if _HUE_SESSION is None:
+            return False
+        try:
+            _HUE_SESSION.stop()
+        except Exception as e:
+            logger.warning(f"Hue stream teardown failed: {e}")
+        _HUE_SESSION = None
+        return True
+
+
 def _hue_error(e):
     """Map a HueError onto its own status; anything else is a 500."""
     if isinstance(e, hue.HueError):
@@ -2832,13 +2858,13 @@ def hue_stream():
     action = (data.get('action') or 'start').lower()
 
     try:
-        with _HUE_LOCK:
-            if action == 'stop':
-                if _HUE_SESSION is not None:
-                    _HUE_SESSION.stop()
-                    _HUE_SESSION = None
-                return jsonify({"streaming": False})
+        # Outside the lock, because _hue_stop takes it itself — it is shared
+        # with /api/stop, which has no business knowing this module's lock.
+        if action == 'stop':
+            _hue_stop()
+            return jsonify({"streaming": False})
 
+        with _HUE_LOCK:
             if action == 'color':
                 if _HUE_SESSION is None or not _HUE_SESSION.is_active():
                     return jsonify({"error": "Not streaming"}), 409

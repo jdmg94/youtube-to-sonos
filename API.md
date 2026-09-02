@@ -404,6 +404,13 @@ urgent. `priority` is `null` for a download that is neither running nor pending.
 Stops the speaker **and tears down the station**, so it stops prefetching from
 YouTube. Not a pause — use `POST /api/transport` with `pause` for that.
 
+It also **ends the light stream and puts the lamps back** (see
+`POST /api/hue/stream`), because the show is over. There is one light stream per
+process and it is not bound to a speaker, so stopping any speaker ends it — with
+one bridge and one household, the only arrangement a single session supports,
+that distinction never surfaces. The lights are best-effort: a bridge that has
+gone away is logged, not reported here, since the caller asked about a speaker.
+
 **404** no speakers. **500** otherwise.
 
 ---
@@ -522,6 +529,31 @@ handshake rather than a bug report.
 Only one stream exists per process, because the bridge permits exactly one.
 Starting on the area already running is a no-op; starting on a different one
 tears the first down first.
+
+**Stopping puts the lamps back where the show found them.** The bridge hands
+control back when the area is deactivated but does not restore the room, so
+`start` first reads the area's lights and `stop` re-applies that snapshot — on,
+brightness, and either `xy` or `mirek`, whichever the lamp was actually
+showing. A lamp that was off is only told to be off, since a colour in the same
+breath is a blink on the way out. This is instant, with no `dynamics`.
+
+Which lamps an area covers is not something the bridge states: an area lists
+channels, a channel lists the `entertainment` services feeding it, and an
+entertainment service and a light are two services of one device — so the
+device is the join, and it costs three list calls. A shape that resolves to
+nothing restores nothing, deliberately; the tempting fallback of every light on
+the bridge reaches into rooms the show never touched.
+
+The whole restore is best-effort and never fails a stop: no snapshot (the
+bridge was busy at start) means no restore, and one unreachable lamp is logged
+rather than abandoning the rest of the room. It runs on the request thread with
+its own short `HUE_RESTORE_TIMEOUT` (3s), because the full 10s `HTTP_TIMEOUT`
+times the size of the room is a long time to hold a Stop open.
+
+The same teardown runs on `POST /api/stop`, when switching areas, and when a
+handshake fails after the area was already activated — activating an area
+lights its lamps before a single frame is sent, so that last one has a room to
+put back too.
 
 **409** not paired, no entertainment area exists, the chosen area has no lights
 assigned (which would otherwise handshake, stream, and show nothing — a success
