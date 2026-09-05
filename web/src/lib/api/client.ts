@@ -26,6 +26,8 @@ import type {
   Rgb,
   Station,
   StationRefreshResponse,
+  StationRemoveRequest,
+  StationRemoveResponse,
   StopResponse,
   TransportRequest,
   TransportResponse,
@@ -247,6 +249,21 @@ export const api = {
       body: { device_ip: deviceIp },
       // Picking replacement tracks resolves them through yt-dlp synchronously.
       timeoutMs: DISCOVERY_TIMEOUT_MS,
+      signal,
+    }),
+
+  /**
+   * Drop one upcoming track. Default timeout, unlike `refreshStation`: the
+   * server does not resolve a replacement on this path, it lets the station
+   * loop top the tail back up a tick later.
+   *
+   * Answers 409 for a click that lost a race with the station loop — the index
+   * no longer names the id sent with it. That is a retry, not a fault.
+   */
+  removeTrack: (body: StationRemoveRequest, signal?: AbortSignal) =>
+    request<StationRemoveResponse>("/api/station/remove", {
+      method: "POST",
+      body,
       signal,
     }),
 

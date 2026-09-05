@@ -84,6 +84,11 @@ export function rowStatus(track: StationTrack): TrackStatus {
 export interface QueueRow {
   /** The station index. Also what `jump` is addressed by. */
   index: number;
+  /**
+   * The video id. Sent alongside the index on a removal so the server can
+   * check that the two still agree — see `describeRemove`.
+   */
+  id: string;
   title: string;
   uploader: string;
   /** `null` renders the music-note placeholder. */
@@ -98,6 +103,19 @@ export interface QueueRow {
    * either way — see `describeJump`.
    */
   jumpable: boolean;
+  /**
+   * Whether this row gets a remove button at all.
+   *
+   * The opposite treatment to `jumpable`, which leaves the row clickable and
+   * answers with a reason. A refusal to jump is temporary and worth
+   * explaining — "still downloading" means wait — whereas a row at or behind
+   * the cursor can never be removed and there is nothing to wait for. A
+   * button that will never work is worse than no button.
+   *
+   * Note this says nothing about download state: a track that failed or has
+   * not started is exactly the one worth dropping.
+   */
+  removable: boolean;
 }
 
 /**
@@ -116,6 +134,7 @@ function describeRow(track: StationTrack, index: number, cursor: number): QueueR
   const status = rowStatus(track);
   return {
     index,
+    id: track.id,
     // `||` and not `??`: the backend sends `null` for an untitled track, but
     // a metadata sidecar written from a stream with an empty tag sends `""`,
     // and an empty string here collapses the row to a blank line.
@@ -126,6 +145,7 @@ function describeRow(track: StationTrack, index: number, cursor: number): QueueR
     statusLabel: STATUS_LABEL[status],
     active: index === cursor,
     jumpable: isJumpable(track),
+    removable: index > cursor,
   };
 }
 
@@ -197,4 +217,48 @@ export function canRefresh(
 export function describeRefresh(dropped: number): string {
   const plural = dropped === 1 ? "track" : "tracks";
   return `Queue refreshed — ${dropped} ${plural} replaced`;
+}
+
+export type RemoveDecision =
+  | { ok: true; index: number; id: string }
+  | { ok: false; message: string };
+
+/**
+ * What a click on row `index`'s remove button should send.
+ *
+ * The id travels with the index and is not redundant. The index is a position
+ * in *this* render's list, and the station is replaced wholesale on every SSE
+ * frame — a play-next insert landing in between renumbers everything after it,
+ * so by the time the request arrives the index can name a different song. The
+ * server checks the pair and refuses on a mismatch, which turns "the wrong
+ * track silently disappeared" into "try again".
+ *
+ * The refusals here are the same guards the server applies, evaluated early so
+ * a stale click costs no round trip. They should be unreachable from a
+ * rendered button — `removable` gates it on exactly this condition, and a test
+ * pins the two together.
+ */
+export function describeRemove(
+  station: StationBody | null | undefined,
+  index: number,
+): RemoveDecision {
+  const track = index >= 0 ? station?.tracks[index] : undefined;
+  if (!track) return { ok: false, message: "That track is no longer queued" };
+  // Removing at or behind the cursor renumbers the playing track's own queue
+  // position out from under both lists; the server refuses it too.
+  if (index <= (station?.index ?? 0)) {
+    return { ok: false, message: "That track is already playing" };
+  }
+  return { ok: true, index, id: track.id };
+}
+
+/**
+ * The toast after a removal.
+ *
+ * Names the track, because by the time this is read the row is gone and the
+ * toast is the only thing left that can confirm which one went — the failure
+ * mode being a mis-tap on a list that just re-rendered.
+ */
+export function describeRemoved(title: string | null | undefined): string {
+  return `Removed ${title || UNTITLED}`;
 }

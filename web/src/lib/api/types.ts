@@ -217,6 +217,31 @@ export interface StationRefreshResponse extends Station {
 }
 
 /**
+ * `POST /api/station/remove`.
+ *
+ * `id` is not redundant with `index`. The index is a position in the list the
+ * client last rendered, and the station is replaced wholesale on every SSE
+ * frame — the server checks the pair still agree and answers 409 rather than
+ * removing whatever now sits at that index.
+ */
+export interface StationRemoveRequest {
+  device_ip?: string;
+  /** 0-based index into the station track list. Must be after the cursor. */
+  index: number;
+  /** The video id the client believes is at `index`. */
+  id: string;
+}
+
+export interface StationRemoveResponse extends Station {
+  status: "removed";
+  /** The video id that went. */
+  removed: string;
+  /** Its title, for the toast. `null` for a track yt-dlp could not name. */
+  title: string | null;
+  device: string;
+}
+
+/**
  * Whether the speaker can be told to play this track.
  *
  * The one condition is that the track has been handed to Sonos. Asking it to

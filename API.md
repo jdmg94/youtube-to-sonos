@@ -271,6 +271,55 @@ truncate safely.
 
 ---
 
+## `POST /api/station/remove`
+
+Drops a single upcoming track from the station and from the speaker's queue,
+leaving everything else queued and downloaded. The finer-grained refresh.
+
+```json
+{ "device_ip": "192.168.1.31", "index": 5, "id": "dQw4w9WgXcQ" }
+```
+
+| Field | Meaning |
+| --- | --- |
+| `index` | 0-based index into the station track list. Must be **after** the cursor. |
+| `id` | The video id the client believes is at `index`. Required. |
+
+`id` is not redundant. `index` is a position in the list the client last
+rendered, and the station changes under it — the loop appends, a play-next
+insert renumbers. The server checks the pair still agree and refuses rather
+than removing whatever now sits there. **Clients must send the id from the same
+payload the index came from**, not one remembered separately.
+
+Only a track after the cursor may go. A removal renumbers `playlist_position`
+for everything following it, so removing at or behind the cursor moves the
+playing track out from under both the Sonos queue and the server's list — the
+same reason a general mid-session trim is forbidden.
+
+The removed id stays in the station's played set, so the top-up that refills
+the tail cannot hand it straight back. No replacement is resolved on this
+request; the station loop tops the queue back up within a poll.
+
+Response is the `/api/station` payload plus:
+
+```json
+{ "status": "removed", "removed": "dQw4w9WgXcQ", "title": "Never Gonna Give You Up", "device": "Kitchen" }
+```
+
+`title` is the removed track's, for a confirmation message. It can be `null`,
+like every other yt-dlp-sourced title.
+
+**400** `index` missing or not a number, or `id` missing.
+**404** no speakers, or no station running on this one.
+**409** every lost race, each with its own message: `"That track is no longer
+queued"`, `"That track is already playing"`, `"The queue moved on — try
+again"`, `"The speaker refused to remove that track"`, `"This speaker isn't
+playing from its queue"`. All five mean the request was well-formed and would
+have worked a moment earlier — show the message and let the user retry against
+the fresh list; nothing was removed.
+
+---
+
 ## `GET /api/now-playing?device_ip=<ip>`
 
 ```json

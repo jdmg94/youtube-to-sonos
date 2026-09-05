@@ -1831,6 +1831,30 @@ def end_station(device_ip):
                     download.cancel()
 
 
+def _drop_pending_downloads(discarded):
+    """Cancel the pending downloads of tracks a station has just thrown away.
+
+    Shared by `refresh_station` and `remove_from_station`, with end_station's
+    guards: never touch a track another station still lists or a /media reader
+    is on, and `cancel()` (penalty-free) rather than `finish('failed')`, which
+    would put the track in a retry cooldown it did nothing to earn.
+
+    Running downloads are deliberately left alone — cancelling one out from
+    under an open /media socket would stall the speaker reading it.
+    """
+    with _STATE_LOCK:
+        wanted = {m['video_id'] for other in STATION.values()
+                  for m in other.tracks}
+        for meta in discarded:
+            vid = meta['video_id']
+            if vid in wanted or _INUSE.get(vid):
+                continue
+            if _SCHED.cancel(vid):
+                download = _DOWNLOADS.get(vid)
+                if download is not None and download.state == 'queued':
+                    download.cancel()
+
+
 def refresh_station(coordinator, station):
     """Drop everything queued after the playing track and refill it anew.
 
@@ -1894,20 +1918,7 @@ def refresh_station(coordinator, station):
         station.played_order = [v for v in station.played_order
                                 if v not in surviving] + survivors
 
-        # Cancel the discarded tracks' pending downloads, with end_station's
-        # guards: never touch one another station still lists or a /media reader
-        # is on, and cancel (penalty-free) rather than fail them.
-        with _STATE_LOCK:
-            wanted = {m['video_id'] for other in STATION.values()
-                      for m in other.tracks}
-            for meta in dropped:
-                vid = meta['video_id']
-                if vid in wanted or _INUSE.get(vid):
-                    continue
-                if _SCHED.cancel(vid):
-                    download = _DOWNLOADS.get(vid)
-                    if download is not None and download.state == 'queued':
-                        download.cancel()
+        _drop_pending_downloads(dropped)
 
         logger.info(f"Refreshing station on {station.device_ip}: dropped "
                     f"{len(dropped)} track(s) after position {cursor + 1}")
@@ -1917,6 +1928,79 @@ def refresh_station(coordinator, station):
 
     _flush_queue(station, coordinator)
     return len(dropped)
+
+
+def remove_from_station(coordinator, station, index, video_id):
+    """Drop one upcoming track from the station and the speaker's queue.
+
+    Returns `(meta, None)` for the track that was removed, or `(None, reason)`
+    with a sentence to show the user. Every refusal is a normal race, not a
+    fault: the station is re-rendered from every SSE frame, and the loop can
+    insert or drop tracks between the render and the click.
+
+    Only a track *after* the cursor may go, which is what makes trimming the
+    Sonos queue safe here — the same reasoning as `refresh_station`, and the
+    only reasoning that holds: a removal renumbers `playlist_position` for
+    everything after it, so removing at or behind the cursor moves the playing
+    track out from under both lists.
+
+    `video_id` is checked against the index rather than trusted from it. The
+    client's list is a snapshot; if the loop has since inserted a play-next
+    track the index now names a different song, and deleting the wrong one is
+    silent — the listener sees a row vanish and has no reason to doubt it.
+
+    `played_ids` / `played_titles` / `_RECENT` keep the removed id, so the
+    top-up that refills the tail cannot hand it straight back.
+    """
+    with station.lock:
+        position = _queue_position(coordinator)
+        if position <= 0 or not station.tracks:
+            return None, "This speaker isn't playing from its queue"
+
+        cursor = min(position - 1, len(station.tracks) - 1)
+        if cursor >= station.enqueued:
+            # Our list and the speaker's queue have drifted; a removal computed
+            # from `tracks` would land on the wrong queue item.
+            logger.warning(f"Station on {station.device_ip} is behind the "
+                           f"speaker (cursor {cursor}, {station.enqueued} "
+                           f"enqueued); not removing")
+            return None, "This speaker isn't playing from its queue"
+        station.index = cursor
+
+        if index < 0 or index >= len(station.tracks):
+            return None, "That track is no longer queued"
+        if index <= cursor:
+            return None, "That track is already playing"
+        if station.tracks[index]['video_id'] != video_id:
+            return None, "The queue moved on — try again"
+
+        if index < station.enqueued:
+            # Ask the speaker first. A rejected removal leaves both lists as
+            # they were: letting `tracks` shrink past what the queue actually
+            # holds misaligns every position calculation for the rest of the
+            # session, which is far worse than a failed button press.
+            try:
+                coordinator.remove_from_queue(index)
+            except Exception as e:
+                logger.warning(f"Could not remove queue item {index} on "
+                               f"{station.device_ip}: {e}")
+                return None, "The speaker refused to remove that track"
+            station.enqueued -= 1
+
+        meta = station.tracks.pop(index)
+        # The list is short again, so the loop should look for more even if it
+        # had given up.
+        station.exhausted = False
+        # Everything after the removal is now one track closer to the cursor.
+        _reprioritize(station)
+        _drop_pending_downloads([meta])
+
+    logger.info(f"Removed {meta['video_id']} from station on "
+                f"{station.device_ip} at index {index}")
+    # No synchronous refill: the station loop's next tick tops the tail back up
+    # to WINDOW_AHEAD, and resolving a replacement here would cost the caller a
+    # yt-dlp round trip to make one row disappear.
+    return meta, None
 
 
 PLAYING_STATES = ('PLAYING', 'TRANSITIONING')
@@ -2416,6 +2500,57 @@ def station_refresh():
         return jsonify(payload)
     except Exception as e:
         return _yt_error_response(e, "queue refresh")
+
+
+@app.route('/api/station/remove', methods=['POST'])
+def station_remove():
+    """Drop a single upcoming track from the queue, leaving the rest alone.
+
+    The finer-grained version of a refresh: one song the listener doesn't want
+    goes, and everything they were happy with stays queued and downloaded.
+
+    `id` is required alongside `index` and is not redundant. The client's list
+    is a snapshot of an SSE frame, so by the time a click arrives the index may
+    name a different track; sending both lets the server refuse rather than
+    quietly delete the wrong song.
+    """
+    data = request.get_json() or {}
+    device_ip = data.get('device_ip')
+    video_id = data.get('id')
+
+    try:
+        index = int(data.get('index'))
+    except (TypeError, ValueError):
+        return jsonify({"error": "index must be a number"}), 400
+    if not video_id:
+        return jsonify({"error": "id is required"}), 400
+
+    try:
+        speaker = _resolve_speaker(device_ip)
+        if speaker is None:
+            return jsonify({"error": "No Sonos devices discovered"}), 404
+        device_ip = speaker.ip_address
+        with _STATE_LOCK:
+            station = STATION.get(device_ip)
+        if station is None:
+            return jsonify({"error": "No station is running on this speaker"}), 404
+
+        meta, reason = remove_from_station(
+            _coordinator(speaker), station, index, video_id)
+        if meta is None:
+            # Every one of these is a lost race or a stale click, so it is a
+            # 409 rather than a 400: the request was well-formed and would have
+            # worked a moment earlier.
+            return jsonify({"error": reason}), 409
+
+        payload = station_payload(station)
+        payload.update({"status": "removed", "removed": meta['video_id'],
+                        "title": meta.get('title'), "device_ip": device_ip,
+                        "device": speaker.player_name})
+        return jsonify(payload)
+    except Exception as e:
+        logger.error(f"Queue removal failed: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/downloads', methods=['GET'])

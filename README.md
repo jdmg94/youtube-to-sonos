@@ -456,6 +456,16 @@ curl -X POST http://$SERVER/api/station/refresh \
   -H 'Content-Type: application/json' \
   -d '{"device_ip":"192.168.1.55"}'
 
+# Remove — drop one upcoming track and leave the rest of the queue alone.
+# "index" is into the list /api/station returns and must be after its
+# "index" cursor; "id" is the video id you believe is at that position, and
+# is required. The station list can be renumbered by a play-next insert
+# between reading it and posting this, so the server checks the pair and
+# answers 409 rather than deleting the wrong song.
+curl -X POST http://$SERVER/api/station/remove \
+  -H 'Content-Type: application/json' \
+  -d '{"device_ip":"192.168.1.55","index":5,"id":"dQw4w9WgXcQ"}'
+
 # The download scheduler: what's running, what's queued, at what priority.
 # Priority is distance from what the speaker needs: -1 = a speaker is waiting
 # on it right now, 0 = the current track, N = N tracks ahead.

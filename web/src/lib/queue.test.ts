@@ -21,6 +21,8 @@ import {
   describeJump,
   describeQueue,
   describeRefresh,
+  describeRemove,
+  describeRemoved,
   rowStatus,
   trackStatus,
 } from "@/lib/queue";
@@ -216,6 +218,114 @@ describe("describeQueue", () => {
       station({ tracks: [track({ cached: "running", queue_pos: null })] }),
     );
     assert.equal(rows[0].jumpable, false);
+  });
+
+  it("offers removal only on the rows still to come", () => {
+    // The backend refuses anything at or behind the cursor, because a removal
+    // renumbers `playlist_position` for everything after it — take out the
+    // playing track and the speaker's own position moves under both lists.
+    const rows = describeQueue(
+      station({ index: 1, tracks: [track(), track(), track()] }),
+    );
+    assert.equal(rows[0].removable, false, "already played");
+    assert.equal(rows[1].removable, false, "playing now");
+    assert.equal(rows[2].removable, true, "still to come");
+  });
+
+  it("offers removal on a track that has not been downloaded yet", () => {
+    // Unlike jumping, removal has nothing to do with the bytes: a track the
+    // scheduler has not started is exactly the one worth dropping, and it is
+    // not on the Sonos queue at all so nothing needs renumbering.
+    const rows = describeQueue(
+      station({
+        index: 0,
+        tracks: [track(), track({ cached: "queued", queue_pos: null })],
+      }),
+    );
+    assert.equal(rows[1].removable, true);
+    assert.equal(rows[1].jumpable, false);
+  });
+
+  it("offers removal on a track that failed to download", () => {
+    // The one row the listener most wants gone.
+    const rows = describeQueue(
+      station({
+        index: 0,
+        tracks: [track(), track({ cached: "failed", queue_pos: null })],
+      }),
+    );
+    assert.equal(rows[1].removable, true);
+  });
+
+  it("carries each row's id, so a removal can be checked against its index", () => {
+    const rows = describeQueue(
+      station({ tracks: [track({ id: "aaa" }), track({ id: "bbb" })] }),
+    );
+    assert.equal(rows[0].id, "aaa");
+    assert.equal(rows[1].id, "bbb");
+  });
+});
+
+describe("describeRemove", () => {
+  it("sends the index and the id together", () => {
+    // Both, always: the index alone is a position in a list the server may
+    // have changed since this frame, and acting on it deletes the wrong song
+    // silently.
+    const list = station({ index: 0, tracks: [track({ id: "aaa" }), track({ id: "bbb" })] });
+    assert.deepEqual(describeRemove(list, 1), { ok: true, index: 1, id: "bbb" });
+  });
+
+  it("refuses the playing track", () => {
+    const list = station({ index: 1, tracks: [track(), track(), track()] });
+    assert.deepEqual(describeRemove(list, 1), {
+      ok: false,
+      message: "That track is already playing",
+    });
+  });
+
+  it("refuses a track that has already played", () => {
+    const list = station({ index: 2, tracks: [track(), track(), track()] });
+    assert.equal(describeRemove(list, 0).ok, false);
+  });
+
+  it("refuses an index the station no longer has", () => {
+    const decision = describeRemove(station({ tracks: [track()] }), 7);
+    assert.deepEqual(decision, { ok: false, message: "That track is no longer queued" });
+  });
+
+  it("refuses a negative index", () => {
+    assert.equal(describeRemove(station({ tracks: [track()] }), -1).ok, false);
+  });
+
+  it("refuses when there is no station at all", () => {
+    assert.equal(describeRemove(null, 0).ok, false);
+    assert.equal(describeRemove(undefined, 0).ok, false);
+  });
+
+  it("agrees with the row it is offered on", () => {
+    // The button is rendered from `removable` and the request is built from
+    // `describeRemove`. If they ever disagree the listener gets a button that
+    // answers with a refusal, which is the exact confusion the always-visible
+    // X is meant to avoid.
+    const list = station({ index: 1, tracks: [track(), track(), track(), track()] });
+    for (const row of describeQueue(list)) {
+      assert.equal(row.removable, describeRemove(list, row.index).ok, `row ${row.index}`);
+    }
+  });
+});
+
+describe("describeRemoved", () => {
+  it("names the track that went", () => {
+    // The row is gone by the time this is read, so the toast is the only thing
+    // that can confirm which one — the whole point of naming it.
+    assert.equal(describeRemoved("Rocket Man"), "Removed Rocket Man");
+  });
+
+  it("falls back to a name for a track the backend could not name", () => {
+    // The backend sends `title: null` straight from the station meta, and
+    // "Removed null" is what the plain interpolation gives.
+    assert.equal(describeRemoved(null), `Removed ${UNTITLED}`);
+    assert.equal(describeRemoved(""), `Removed ${UNTITLED}`);
   });
 });
 

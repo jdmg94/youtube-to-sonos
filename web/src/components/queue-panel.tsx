@@ -1,13 +1,23 @@
 "use client";
 
-import { ArrowDown, ListMusic, Loader2, Music, Play, RefreshCw, TriangleAlert } from "lucide-react";
+import { ArrowDown, ListMusic, Loader2, Music, Play, RefreshCw, TriangleAlert, X } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
 
 import { api } from "@/lib/api/client";
 import type { Device, StationBody } from "@/lib/api/types";
 import { useAction } from "@/lib/hooks/use-action";
 import { useErrorToast } from "@/lib/hooks/use-error-toast";
-import { canRefresh, describeJump, describeQueue, describeRefresh, NO_TRACKS, type QueueRow } from "@/lib/queue";
+import {
+  canRefresh,
+  describeJump,
+  describeQueue,
+  describeRefresh,
+  describeRemove,
+  describeRemoved,
+  NO_TRACKS,
+  type QueueRow,
+} from "@/lib/queue";
 import { cn } from "@/lib/utils";
 
 export interface QueuePanelProps {
@@ -18,10 +28,11 @@ export interface QueuePanelProps {
 /**
  * The station, as the server has it: what has played, what is on, what is next.
  *
- * A read-only mirror with one write — clicking a row tells the speaker to jump
- * there. Sonos owns this queue and advances it on its own, so nothing here is
- * patched locally; the list is re-derived from every event frame and a jump is
- * acknowledged by the row highlight moving a poll later.
+ * A mirror of server state with two writes — clicking a row tells the speaker
+ * to jump there, and an upcoming row's X drops it. Sonos owns this queue and
+ * advances it on its own, so nothing here is patched locally: the list is
+ * re-derived from every event frame, and both writes are acknowledged by the
+ * next frame rather than by a local edit.
  */
 export function QueuePanel({ device, station }: QueuePanelProps) {
   const deviceIp = device?.ip;
@@ -34,9 +45,27 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
     toast.success(describeRefresh(result.dropped));
     return result;
   });
+  const remove = useAction(async (index: number, id: string) => {
+    const result = await api.removeTrack({ device_ip: deviceIp, index, id });
+    // The server's title, not the row's: the row's is a render old, and the
+    // whole point of naming the track is to confirm which one actually went.
+    toast.success(describeRemoved(result.title));
+    return result;
+  });
+
+  /*
+   * Which row's X shows the spinner. `remove.pending` is one flag for the whole
+   * action, so on its own it would spin every button on the list — and this
+   * panel's entire failure mode is the listener not being sure which track a
+   * click landed on. Held by video id rather than by index because the station
+   * renumbers underneath it. Never cleared: it is only ever read alongside
+   * `remove.pending`, and clearing it would need an effect for nothing.
+   */
+  const [removing, setRemoving] = useState<string | null>(null);
 
   useErrorToast(jump.error);
   useErrorToast(refresh.error);
+  useErrorToast(remove.error);
 
   const rows = describeQueue(station);
 
@@ -89,14 +118,34 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
             <li key={row.index}>
               <QueueItem
                 row={row}
-                disabled={!device || jump.pending}
-                onClick={() => {
+                disabled={!device}
+                jumpDisabled={jump.pending}
+                /*
+                 * One removal at a time, and not only to stop a double-click.
+                 * Two X's clicked from the same render carry indices computed
+                 * against the same list, and the first removal renumbers the
+                 * second — the server's id check turns that into a 409 rather
+                 * than the wrong song, but a refusal the user has to
+                 * understand is worse than a button that waits.
+                 */
+                removeDisabled={remove.pending}
+                removing={remove.pending && removing === row.id}
+                onJump={() => {
                   const decision = describeJump(station, row.index);
                   if (!decision.ok) {
                     toast.error(decision.message);
                     return;
                   }
                   void jump.run(decision.index);
+                }}
+                onRemove={() => {
+                  const decision = describeRemove(station, row.index);
+                  if (!decision.ok) {
+                    toast.error(decision.message);
+                    return;
+                  }
+                  setRemoving(decision.id);
+                  void remove.run(decision.index, decision.id);
                 }}
               />
             </li>
@@ -107,92 +156,138 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
   );
 }
 
+/**
+ * One row: a jump button filling it, and an X for the tracks still to come.
+ *
+ * The row is a `<div>` wrapping two buttons rather than being a button itself,
+ * which it has to be — a `<button>` cannot contain a `<button>`, and nesting
+ * them produces markup browsers silently re-parse into siblings. The visual
+ * chrome (border, background, hover) therefore lives on the wrapper, so the
+ * whole row still lights up as one thing including under the X.
+ */
 function QueueItem({
   row,
   disabled,
-  onClick,
+  jumpDisabled,
+  removeDisabled,
+  removing,
+  onJump,
+  onRemove,
 }: {
   row: QueueRow;
+  /** No speaker to send anything to. Applies to both buttons. */
   disabled: boolean;
-  onClick: () => void;
+  jumpDisabled: boolean;
+  removeDisabled: boolean;
+  /** This row is the one being removed — spin its X, not every row's. */
+  removing: boolean;
+  onJump: () => void;
+  onRemove: () => void;
 }) {
   const Icon = ROW_ICON[row.status];
 
   return (
-    /*
-     * A row that can't be jumped to stays enabled. `disabled` here is only
-     * "there is no speaker to send this to" or "a jump is already in flight" —
-     * a track that is still downloading answers with a reason instead, because
-     * a disabled row explains itself through a `title` tooltip that does not
-     * exist on a phone, and "the track I tapped did nothing" is the confusion
-     * this panel is most likely to cause.
-     */
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      aria-current={row.active ? "true" : undefined}
+    <div
       className={cn(
-        "group flex w-full cursor-pointer items-center gap-3 rounded-xl border p-2 text-left transition-all duration-200",
-        "disabled:pointer-events-none disabled:opacity-50",
+        "group flex w-full items-center rounded-xl border transition-all duration-200",
         row.active
           ? "border-ok/30 bg-ok/[0.08]"
           : "border-transparent bg-white/[0.03] hover:bg-white/[0.07]",
+        disabled && "opacity-50",
       )}
     >
-      {row.thumbnail ? (
-        /*
-         * A plain <img>. These are YouTube CDN URLs on hosts that change, and
-         * next/image would need every one of them in `remotePatterns` — and
-         * would then proxy a 48px thumbnail through the Next server on the way
-         * to a LAN client that can already reach YouTube directly.
-         */
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={row.thumbnail}
-          alt=""
-          className="size-12 shrink-0 rounded-lg bg-white/[0.05] object-cover"
-        />
-      ) : (
-        <span className="flex size-12 shrink-0 items-center justify-center rounded-lg bg-white/[0.05] text-muted-foreground">
-          <Music aria-hidden className="size-4" />
-        </span>
-      )}
+      {/*
+       * A row that can't be jumped to stays enabled. `disabled` here is only
+       * "there is no speaker to send this to" or "a jump is already in flight"
+       * — a track that is still downloading answers with a reason instead,
+       * because a disabled row explains itself through a `title` tooltip that
+       * does not exist on a phone, and "the track I tapped did nothing" is the
+       * confusion this panel is most likely to cause.
+       */}
+      <button
+        type="button"
+        onClick={onJump}
+        disabled={disabled || jumpDisabled}
+        aria-current={row.active ? "true" : undefined}
+        className="flex min-w-0 grow cursor-pointer items-center gap-3 p-2 text-left disabled:pointer-events-none"
+      >
+        {row.thumbnail ? (
+          /*
+           * A plain <img>. These are YouTube CDN URLs on hosts that change, and
+           * next/image would need every one of them in `remotePatterns` — and
+           * would then proxy a 48px thumbnail through the Next server on the way
+           * to a LAN client that can already reach YouTube directly.
+           */
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={row.thumbnail}
+            alt=""
+            className="size-12 shrink-0 rounded-lg bg-white/[0.05] object-cover"
+          />
+        ) : (
+          <span className="flex size-12 shrink-0 items-center justify-center rounded-lg bg-white/[0.05] text-muted-foreground">
+            <Music aria-hidden className="size-4" />
+          </span>
+        )}
 
-      <span className="flex min-w-0 grow flex-col gap-[0.1rem]">
-        <span className="truncate text-[0.9rem] font-semibold" title={row.title}>
-          {row.title}
+        <span className="flex min-w-0 grow flex-col gap-[0.1rem]">
+          <span className="truncate text-[0.9rem] font-semibold" title={row.title}>
+            {row.title}
+          </span>
+          <span className="flex min-w-0 items-baseline gap-1 text-[0.75rem] text-muted-foreground">
+            <span className="truncate">{row.uploader}</span>
+            {/*
+             * The status is its own element rather than being appended to the
+             * uploader, so that truncation eats the channel name and not
+             * "downloading…" — in a 300px sidebar a concatenated label loses its
+             * tail first, which is the only half that changes.
+             */}
+            {row.statusLabel && (
+              <span className="shrink-0 whitespace-nowrap">· {row.statusLabel}</span>
+            )}
+          </span>
         </span>
-        <span className="flex min-w-0 items-baseline gap-1 text-[0.75rem] text-muted-foreground">
-          <span className="truncate">{row.uploader}</span>
-          {/*
-           * The status is its own element rather than being appended to the
-           * uploader, so that truncation eats the channel name and not
-           * "downloading…" — in a 300px sidebar a concatenated label loses its
-           * tail first, which is the only half that changes.
-           */}
-          {row.statusLabel && (
-            <span className="shrink-0 whitespace-nowrap">· {row.statusLabel}</span>
+
+        {/*
+         * No blink on the downloading arrow, unlike the original. `fa-fade`
+         * animates `opacity`, which outranks the `opacity: 0` that hides this
+         * icon until hover — so every still-downloading row showed a pulsing
+         * arrow permanently while its neighbours showed nothing, which reads as
+         * the only rows with an affordance. The status label says the same thing
+         * in words and cannot fight the hover state for it.
+         */}
+        <Icon
+          aria-hidden
+          className={cn(
+            "size-3.5 shrink-0 transition-opacity duration-200 group-hover:opacity-100",
+            row.active ? "text-ok opacity-100" : "text-muted-foreground opacity-0",
           )}
-        </span>
-      </span>
+        />
+      </button>
 
       {/*
-       * No blink on the downloading arrow, unlike the original. `fa-fade`
-       * animates `opacity`, which outranks the `opacity: 0` that hides this
-       * icon until hover — so every still-downloading row showed a pulsing
-       * arrow permanently while its neighbours showed nothing, which reads as
-       * the only rows with an affordance. The status label says the same thing
-       * in words and cannot fight the hover state for it.
+       * Absent, not disabled, on a row that has played or is playing: those can
+       * never be removed, and a permanently dead button is a worse answer than
+       * no button. Always visible on the rows that can — a hover-only control
+       * does not exist on a phone, which is where most of this app is used.
        */}
-      <Icon
-        aria-hidden
-        className={cn(
-          "size-3.5 shrink-0 transition-opacity duration-200 group-hover:opacity-100",
-          row.active ? "text-ok opacity-100" : "text-muted-foreground opacity-0",
-        )}
-      />
-    </button>
+      {row.removable && (
+        <button
+          type="button"
+          onClick={onRemove}
+          disabled={disabled || removeDisabled}
+          aria-label={`Remove ${row.title} from the queue`}
+          title="Remove from the queue"
+          className="mr-2 flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors duration-200 hover:bg-destructive/15 hover:text-destructive disabled:pointer-events-none disabled:opacity-40"
+        >
+          {removing ? (
+            <Loader2 aria-hidden className="size-3.5 animate-spin" />
+          ) : (
+            <X aria-hidden className="size-3.5" />
+          )}
+        </button>
+      )}
+    </div>
   );
 }
 
