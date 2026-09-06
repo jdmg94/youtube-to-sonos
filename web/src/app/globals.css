@@ -1,0 +1,347 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Design tokens ported from the original `templates/index.html`, which was
+ * deleted at cutover — these values are now the only copy, so treat them as
+ * source rather than as a mirror of something else.
+ *
+ * The app is dark-only — there is no light mode and never was — so the palette
+ * lives in :root rather than under .dark. Keeping shadcn's variable *names*
+ * (--background, --primary, --card…) is what lets its components inherit this
+ * look instead of shipping their default neutral gray; the app-specific tokens
+ * below (--brand-*, --glass-*) cover the parts shadcn has no concept of.
+ */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-jakarta);
+  --font-display: var(--font-outfit);
+  --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-outfit);
+
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+
+  /* App-specific. `brand` is the YouTube red, `gold` the Sonos gold; the
+     original UI uses them together as a gradient for the logo and CTAs. */
+  --color-brand: var(--brand);
+  --color-brand-strong: var(--brand-strong);
+  --color-gold: var(--gold);
+  --color-glass: var(--glass);
+  --color-glass-card: var(--glass-card);
+  --color-ok: var(--ok);
+
+  /* Tailwind's own `animate-pulse` is a 2s ease that only dips to 50% opacity;
+     this is the original's faster, deeper blink, which reads as activity rather
+     than as a component waiting to load. */
+  --animate-pulse-dot: pulse-dot 1.2s ease-in-out infinite;
+
+  /* The four-bar equalizer in the now-playing card. `alternate` rather than a
+     0→100→0 keyframe: with four bars on four different delays, a symmetric
+     cycle makes them meet at the bottom on a common multiple and the whole
+     thing flatlines for a beat. */
+  --animate-eq-bounce: eq-bounce 0.8s ease-in-out infinite alternate;
+
+  /* The analyzing placeholder. A travelling highlight rather than a pulse,
+     because analysing is a yt-dlp round trip that can take several seconds and
+     a pulse at that length reads as a element that failed to load. */
+  --animate-skeleton-sweep: skeleton-sweep 1.5s infinite;
+
+  /* The halo behind the Hue pairing prompt. Not a spinner, deliberately: that
+     step ends when someone walks to the bridge and presses a button, and a
+     spinner would promise the app is doing something about it. A slow outward
+     pulse reads as "waiting", which is the truth. */
+  --animate-pulse-ring: pulse-ring 1.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  --background: #0b0f19;
+  --foreground: #f3f4f6;
+
+  /* Glass surfaces. Translucent on purpose — the body's two radial gradients
+     show through them, which is where the depth in this design comes from. */
+  --glass: rgba(20, 27, 45, 0.65);
+  --glass-card: rgba(30, 41, 67, 0.45);
+  --card: rgba(30, 41, 67, 0.45);
+  --card-foreground: #f3f4f6;
+  --popover: #141b2d;
+  --popover-foreground: #f3f4f6;
+
+  --brand: #ff0055; /* YouTube red */
+  --brand-strong: #d00043; /* gradient end for the red CTA */
+  --gold: #d4af37; /* Sonos gold */
+  /* "playing" — the header dot, the now-playing card and its equalizer. The
+     original hard-coded this emerald in fourteen places; it is one token here
+     so the card and the badge cannot drift apart. */
+  --ok: #10b981;
+
+  --primary: #ff0055;
+  --primary-foreground: #ffffff;
+  --secondary: rgba(255, 255, 255, 0.08);
+  --secondary-foreground: #f3f4f6;
+  --muted: rgba(255, 255, 255, 0.05);
+  --muted-foreground: #9ca3af;
+  --accent: rgba(255, 255, 255, 0.08);
+  --accent-foreground: #f3f4f6;
+  --destructive: #ef4444;
+
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.05);
+  /* Gold focus ring, matching the original :focus-visible outline. */
+  --ring: #d4af37;
+
+  --chart-1: #ff0055;
+  --chart-2: #d4af37;
+  --chart-3: #10b981;
+  --chart-4: #9ca3af;
+  --chart-5: #f3f4f6;
+
+  --radius: 0.875rem; /* 14px — the original's input/button radius */
+
+  /* The fixed phone chrome. Each is read in three unrelated places — the bar
+     itself, the padding that keeps the page's last row off it, and the spacer
+     that reserves its space in flow — so they are tokens rather than the same
+     magic number written out three times and only updated in two. Neither is
+     in @theme: nothing needs a `h-tab-bar` utility, and both are used inside
+     `calc()` alongside `env(safe-area-inset-bottom)` anyway. */
+  --tab-bar: 4rem;
+  --mini-player: 4.5rem;
+
+  /* How far a toast sits off the bottom of the screen.
+     Sonner writes its offsets as *inline* CSS variables on its container, so a
+     Tailwind class cannot override them and a plain value cannot be responsive
+     — but a value that is itself a custom property can be, which is what this
+     is. Phones need to clear the tab bar; above the breakpoint the bar does not
+     exist and this collapses to an ordinary margin. */
+  --toast-bottom: calc(var(--tab-bar) + env(safe-area-inset-bottom) + 0.75rem);
+
+  --sidebar: rgba(20, 27, 45, 0.65);
+  --sidebar-foreground: #f3f4f6;
+  --sidebar-primary: #ff0055;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgba(255, 255, 255, 0.08);
+  --sidebar-accent-foreground: #f3f4f6;
+  --sidebar-border: rgba(255, 255, 255, 0.08);
+  --sidebar-ring: #d4af37;
+}
+
+/* The breakpoint the whole shell turns on. Above it there is no tab bar and no
+   mini player, so a toast has nothing to clear. */
+@media (min-width: 901px) {
+  :root {
+    --toast-bottom: 1.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    @apply font-sans;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    /* The two ambient glows behind the glass panels. Fixed rather than scrolled
+       so they stay put when the page scrolls on mobile. */
+    background-image:
+      radial-gradient(
+        circle at 10% 20%,
+        rgba(255, 0, 85, 0.08) 0%,
+        transparent 40%
+      ),
+      radial-gradient(
+        circle at 90% 80%,
+        rgba(212, 175, 55, 0.08) 0%,
+        transparent 40%
+      );
+    background-attachment: fixed;
+  }
+
+  /* Keyboard focus only: a visible gold ring for keyboard users, nothing for
+     mouse users. */
+  :focus-visible {
+    outline: 2px solid var(--gold);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Animating `height` rather than `transform: scaleY` is deliberate: the bars
+   are bottom-aligned in a flex row, and a scale would grow them from the
+   centre unless every one also carried a transform-origin. Four 3px-wide bars
+   is not a layout worth optimising. */
+@keyframes eq-bounce {
+  from {
+    height: 20%;
+  }
+  to {
+    height: 100%;
+  }
+}
+
+/* Travels twice the element's width so the highlight leaves the far edge
+   completely before wrapping; a 100% sweep restarts while still visible. */
+@keyframes skeleton-sweep {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+/* Ends fully transparent rather than looping back: the ring is a wave leaving
+   the button, and a symmetric cycle makes it look like it is being sucked back
+   in. */
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.85);
+    opacity: 0.6;
+  }
+  100% {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+@layer components {
+  /* The fixed phone chrome — tab bar and mini player. Same glass as
+     `.glass-panel` but squared off and bordered on one edge only: these sit
+     flush against the bottom of the viewport, so a radius and a full border
+     would draw two of their four sides off-screen. */
+  .glass-bar {
+    background: var(--glass);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-top: 1px solid var(--border);
+  }
+
+  /* A scrollbar for a list inside a glass panel: the platform default is an
+     opaque light-grey slab that cuts a hard edge through the blur. */
+  .thin-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+  }
+
+  .thin-scrollbar::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .thin-scrollbar::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .thin-scrollbar::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+  }
+
+  /* The frosted panel every card in the app is built on. */
+  .glass-panel {
+    background: var(--glass);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+  }
+
+  /* One bar of the analyzing placeholder. A class rather than utilities
+     because the effect is a background *gradient* sized past the element and
+     slid across it — three properties that have to agree, and that read as
+     noise inlined on every bar.
+
+     NOT named `.shimmer`. Tailwind v4 ships a built-in `shimmer` utility — a
+     110deg sweep painted through `background-clip: text` — and a utility beats
+     anything in `@layer components`, so this rule silently lost every property
+     to it. With no text in the element there was nothing to clip the gradient
+     to, and the placeholder rendered as an empty box while `getComputedStyle`
+     still reported a live animation, which is what made it look applied.
+
+     The alphas are read against `--card` over a near-black `--background`;
+     0.03/0.08 works out to about seven RGB levels and is invisible in place. */
+  .skeleton {
+    background: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.07) 25%,
+      rgba(255, 255, 255, 0.18) 50%,
+      rgba(255, 255, 255, 0.07) 75%
+    );
+    background-size: 200% 100%;
+    animation: var(--animate-skeleton-sweep);
+    border-radius: 8px;
+  }
+
+  /* Logo / heading treatment: the red→gold gradient clipped to the text. */
+  .brand-gradient {
+    background: linear-gradient(135deg, var(--brand) 0%, var(--gold) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+}

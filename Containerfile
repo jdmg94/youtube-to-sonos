@@ -27,12 +27,24 @@ ARG UPDATE_DATE=unknown
 RUN echo "Update key: ${UPDATE_DATE}" && \
     pip3 install --no-cache-dir --upgrade "yt-dlp[default]"
 
+# Audio cache. Mount a host directory or named volume here so downloaded songs
+# survive restarts — otherwise every restart re-downloads from YouTube, which is
+# exactly the bot-detection risk the cache exists to avoid. Deliberately no
+# VOLUME directive: that would create a throwaway anonymous volume on every run.
+RUN mkdir -p /app/cache
+ENV CACHE_DIR=/app/cache
+
 # Layer 4: Application code (frequently changed)
-COPY templates/ templates/
-COPY app.py .
+# This image is the API and media server. The UI has its own image built from
+# web/, and nothing here renders HTML.
+#
+# Every module app.py imports must be listed. It is not a package and there is
+# no setup.py to catch an omission — a missing file here builds and pushes
+# cleanly, then dies at startup on ModuleNotFoundError.
+COPY app.py hue.py analysis.py .
 
-EXPOSE 5000
+EXPOSE 5001
 
-ENV PORT=5000
+ENV PORT=5001
 
 CMD ["python3", "app.py"]

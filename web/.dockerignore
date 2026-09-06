@@ -1,0 +1,36 @@
+# Build artefacts and installed deps. node_modules especially: it is ~900MB,
+# it is platform-specific (native binaries built for the host, not the image),
+# and the build reinstalls it from the lockfile anyway.
+node_modules
+.next
+out
+dist
+
+# Local environment. This is not just noise — it is a correctness bug.
+#
+# `rewrites()` is evaluated during `next build` and the resolved destination is
+# written into .next/routes-manifest.json, so whatever API_ORIGIN is set at
+# build time is baked into the image permanently. A developer's .env.local
+# pointing at, say, 127.0.0.1:5002 for a second backend would
+# silently ship an image that talks to a port existing only on that laptop.
+# API_ORIGIN comes from the build arg in the Dockerfile and nowhere else.
+.env
+.env.*
+
+# Tooling that has no bearing on the built app.
+.git
+.gitignore
+README.md
+AGENTS.md
+CLAUDE.md
+.vscode
+.idea
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+
+# Tests and their harnesses never run in the image; the gates run in CI/locally.
+**/*.test.ts
+**/*.test.tsx
+scripts/test-setup.mts

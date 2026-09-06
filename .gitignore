@@ -8,6 +8,12 @@ __pycache__
 *.pyd
 .db
 
+# podman
+quadlet/*
+
 # yt-dlp cookies (live session auth — never commit)
 cookies.txt
+
+# Downloaded audio cache
+cache/
 .DS_Store

@@ -1,31 +1,114 @@
 # Works with both Docker (`docker compose`) and Podman (`podman-compose`
 # or `podman compose`).
 #
-# Host networking is REQUIRED: Sonos discovery uses SSDP multicast, which
-# does not cross network namespaces, and the speakers must be able to reach
-# this server to pull the audio stream.
+# Two services: `youtube-sonos` is the Flask JSON API and media server, `web`
+# is the Next.js UI. Open the UI on :5000; :5001 is for the speakers and for
+# curl. Nothing but `web` should be reachable from a browser.
+#
+# Host networking is REQUIRED, for a different reason in each service.
+#   youtube-sonos — Sonos discovery is SSDP multicast, which does not cross
+#     network namespaces, and the speakers must reach this host to pull audio.
+#   web — its only job is to proxy /api to the backend, and the backend is on
+#     the host's network stack, not on any bridge. A bridged `web` has no route
+#     to it and no DNS name for it: host networking is what makes `127.0.0.1`
+#     mean the same thing in both containers.
+#
+# Ports are not published because host networking ignores `ports:` entirely —
+# the containers bind the host's interfaces directly. `PORT`/`WEB_PORT` are
+# what move them.
+#
+# NOTE for macOS: this file targets the Linux server. Docker Desktop's host
+# networking is a VM-side shim, so SSDP multicast never reaches the LAN and
+# discovery finds nothing. Develop on the Mac with `pnpm dev` + `make
+# run-local`; test compose on the machine that will run it.
 services:
   youtube-sonos:
     build:
       context: .
       dockerfile: Containerfile
-      # Bump to force a fresh yt-dlp install (fixes YouTube extractor
-      # breakage / 403s). Same effect as `make update-ytdlp`:
-      #   docker compose build --build-arg UPDATE_DATE=$(date +%s)
+      # MUST be bumped to pick up a new yt-dlp. It keys the yt-dlp layer, so
+      # while it stays "unknown" every rebuild reuses the layer built the very
+      # first time and yt-dlp is never updated — the usual cause of 403s and
+      # extraction failures. Use:
+      #   UPDATE_DATE=$(date +%s) docker compose up -d --build
+      # or: make docker-update-ytdlp
       args:
         UPDATE_DATE: ${UPDATE_DATE:-unknown}
     # image: youtube-sonos-streamer
     network_mode: host
     environment:
-      PORT: ${PORT:-5000}
+      PORT: ${PORT:-5001}
+      # Escape hatch for YouTube 403s: pick the player client yt-dlp asks.
+      # Unset = yt-dlp's own default. e.g. "tv" or "default,-web".
+      YTDLP_PLAYER_CLIENT: "${YTDLP_PLAYER_CLIENT:-}"
       # Override the auto-detected LAN IP if the host has multiple NICs.
       # Sonos must be able to reach this address to pull the stream.
       # STREAM_HOST: 192.168.1.50
-    # Optional: yt-dlp cookies to avoid YouTube bot/sign-in checks.
-    # Create cookies.txt in the repo root, then uncomment the mount below.
-    # (Leaving it mounted when the file is missing makes Docker create a
-    # cookies.txt *directory*, which breaks extraction.)
+    # yt-dlp cookies, delivered by mount rather than baked into the image
+    # (.containerignore keeps them out of the build context — they are live
+    # session auth). The file MUST exist before `up`: when the source of a bind
+    # mount is missing, Docker creates a root-owned *directory* in its place and
+    # extraction silently runs unauthenticated. To run without cookies, comment
+    # the mount out AND set COOKIES_FILE: "" — the empty value is what tells the
+    # app the absence is deliberate.
     # :ro,z = read-only + SELinux relabel (the z is ignored on Docker/macOS).
     volumes:
       - ./cookies.txt:/app/cookies.txt:ro,z
+      # Downloaded songs. Persisting this is the whole point of the cache:
+      # a re-listen costs zero YouTube requests. Writable, so no :ro here.
+      - ./cache:/app/cache:z
+    restart: unless-stopped
+    # /api/health and not /api/devices: health must answer "is this process
+    # serving" and nothing else. Hanging it off discovery would mark the API
+    # down — and, through `depends_on`, hold the UI back — every time SSDP has
+    # a bad minute, which is precisely when someone wants to open the UI and
+    # look. curl is already in the image (the Containerfile fetches deno with
+    # it), so this costs no package.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${PORT:-5001}/api/health"]
+      interval: 30s
+      timeout: 5s
+      # yt-dlp and soco import slowly and cache_scan() walks the cache dir
+      # before the first request is served.
+      start_period: 30s
+      retries: 3
+
+  web:
+    build:
+      context: ./web
+      args:
+        # Where the Next server proxies /api. A *build* arg, not an
+        # environment variable, and that distinction is not cosmetic: Next
+        # evaluates `rewrites()` during `next build` and writes the resolved
+        # destination into .next/routes-manifest.json. Setting API_ORIGIN on
+        # the running container has no effect whatsoever — and fails silently,
+        # because the UI boots normally and only the /api calls 404.
+        #
+        # The default interpolates PORT, so it stays pinned to whatever the
+        # backend above is actually listening on and the two cannot drift.
+        # Overriding API_ORIGIN explicitly opts out of that coupling — it is
+        # for pointing the UI at a backend that is NOT the `youtube-sonos`
+        # service in this file (a host-installed one, or another box). If you
+        # override it, PORT no longer has any say in where /api goes.
+        #
+        # Compose does not rebuild on `up` when only a build arg changed, so
+        # changing either variable needs `up -d --build`.
+        API_ORIGIN: ${API_ORIGIN:-http://127.0.0.1:${PORT:-5001}}
+    network_mode: host
+    environment:
+      # The UI's own port — this is the one to open in a browser. Not 3000:
+      # that is Next's own default and the first port anything else on a shared
+      # box takes, so the UI would lose the race and fail to bind.
+      #
+      # 5000 is the UI's, deliberately: it is the address people already have
+      # bookmarked from when the API lived there, and the API — which no human
+      # opens — is the cheaper of the two to move. The backend went to 5001.
+      PORT: ${WEB_PORT:-5000}
+    # Ordering only, not a guarantee: the UI is a client of the API like any
+    # other and renders its own error states when it is down. Waiting for
+    # healthy just avoids handing someone a "Scan error" banner during the
+    # ~10s the backend spends importing yt-dlp on a cold `up`.
+    depends_on:
+      youtube-sonos:
+        condition: service_healthy
     restart: unless-stopped
