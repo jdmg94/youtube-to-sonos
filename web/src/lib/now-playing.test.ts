@@ -66,6 +66,7 @@ describe("describeNowPlaying", () => {
       mode: "playing",
       label: "Now playing · Kitchen",
       title: "Rocket Man",
+      device: "Kitchen",
     });
   });
 
@@ -90,7 +91,12 @@ describe("describeNowPlaying", () => {
     // A stopped speaker keeps answering with the last track's metadata. Showing
     // it would claim music is playing in a silent room.
     const view = describeNowPlaying(frame({ state: "STOPPED" }), "Kitchen");
-    assert.deepEqual(view, { mode: "idle", label: "Idle · Kitchen", title: NO_TRACK });
+    assert.deepEqual(view, {
+      mode: "idle",
+      label: "Idle · Kitchen",
+      title: NO_TRACK,
+      device: "Kitchen",
+    });
   });
 
   it("goes idle with no frame at all, and still names the speaker", () => {
@@ -98,7 +104,22 @@ describe("describeNowPlaying", () => {
     // thing we do know, and dropping it makes the card look disconnected from
     // the speaker the user just chose.
     const view = describeNowPlaying(null, "Kitchen");
-    assert.deepEqual(view, { mode: "idle", label: "Idle · Kitchen", title: NO_TRACK });
+    assert.deepEqual(view, {
+      mode: "idle",
+      label: "Idle · Kitchen",
+      title: NO_TRACK,
+      device: "Kitchen",
+    });
+  });
+
+  it("hands back the speaker name the label was built from", () => {
+    // The player bar prints the room on a line of its own rather than inside a
+    // sentence, and re-deriving `frame.device ?? selected` over there is
+    // precisely the drift this precedence rule exists to prevent.
+    assert.equal(describeNowPlaying(frame({ device: "Office" }), "Kitchen").device, "Office");
+    assert.equal(describeNowPlaying(frame({ device: "" }), "Kitchen").device, "Kitchen");
+    // The one case with no answer: nothing selected and nothing reporting.
+    assert.equal(describeNowPlaying(frame({ device: "" }), null).device, null);
   });
 
   it("prefers the speaker the frame came from over the selected one", () => {

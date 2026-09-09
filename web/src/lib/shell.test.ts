@@ -1,8 +1,8 @@
 /**
  * The shell's failures are all silent ones: a panel assigned to no tab is a
  * feature that has disappeared, a stale tab in `localStorage` is a blank phone
- * screen, and a mini player that shows on the Player tab is a duplicate of the
- * card above it. None of them throw, so they are pinned here.
+ * screen, and a player bar that hides itself is a phone with no way back to the
+ * transport controls at all. None of them throw, so they are pinned here.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -11,11 +11,13 @@ import type { NowPlaying, StationBody, StationTrack } from "@/lib/api/types";
 import { NO_TRACK } from "@/lib/now-playing";
 import {
   DEFAULT_TAB,
+  NOTHING_PLAYING,
+  NO_SPEAKER,
   PANEL_TAB,
   TABS,
   TAB_LABEL,
   currentArtwork,
-  describeMiniPlayer,
+  describePlayerBar,
   isAppTab,
   panelVisible,
   type Panel,
@@ -57,7 +59,7 @@ function station(overrides: Partial<StationBody> = {}): StationBody {
   return { index: 0, exhausted: false, tracks: [track()], ...overrides };
 }
 
-const ALL_PANELS: readonly Panel[] = ["player", "lights", "stream", "queue"];
+const ALL_PANELS: readonly Panel[] = ["lights", "stream", "queue"];
 
 // ---------------------------------------------------------------------------
 
@@ -79,10 +81,17 @@ describe("tabs", () => {
     // `usePersistedState` JSON-parses whatever is under the key. A release that
     // renamed a tab, another tab of the app, or a user in devtools can all put
     // any of these there.
-    for (const junk of [null, undefined, "", "Player", "settings", 0, {}, ["player"]]) {
+    for (const junk of [null, undefined, "", "Queue", "settings", 0, {}, ["queue"]]) {
       assert.equal(isAppTab(junk), false, `${JSON.stringify(junk)} accepted as a tab`);
     }
     for (const tab of TABS) assert.equal(isAppTab(tab), true);
+  });
+
+  it("sends a phone still storing the old Player tab somewhere real", () => {
+    // The player is a sheet now, not a tab. Every install that used the tabbed
+    // build has `"player"` under the storage key, and without this the bar
+    // would highlight nothing over a screen with every panel hidden.
+    assert.equal(isAppTab("player"), false);
   });
 });
 
@@ -93,6 +102,7 @@ describe("PANEL_TAB", () => {
     for (const panel of ALL_PANELS) {
       assert.ok(PANEL_TAB[panel], `${panel} is not assigned to a tab`);
     }
+    assert.equal(Object.keys(PANEL_TAB).length, ALL_PANELS.length);
   });
 
   it("leaves no tab empty", () => {
@@ -114,7 +124,7 @@ describe("PANEL_TAB", () => {
     // `display: contents`, so key order here is the stacking order there. A
     // reordering that put Lights between the two Queue panels would interleave
     // two tabs' worth of markup and could not be expressed by hiding panels.
-    assert.deepEqual(Object.keys(PANEL_TAB), ["player", "lights", "stream", "queue"]);
+    assert.deepEqual(Object.keys(PANEL_TAB), ["lights", "stream", "queue"]);
   });
 
   it("groups each tab's panels contiguously", () => {
@@ -129,6 +139,13 @@ describe("PANEL_TAB", () => {
       assert.equal(span, indexes.length, `${tab}'s panels are not contiguous`);
     }
   });
+
+  it("does not route the player through a tab", () => {
+    // The player is a sheet over both layouts' panels, not one of them. An
+    // entry here would put it back in the tab bar's rotation and hide it
+    // whenever another tab is selected — which is the bug this replaced.
+    assert.equal("player" in PANEL_TAB, false);
+  });
 });
 
 describe("panelVisible", () => {
@@ -142,64 +159,77 @@ describe("panelVisible", () => {
     }
   });
 
-  it("hides the queue while the player is open, and the reverse", () => {
-    assert.equal(panelVisible("queue", "player"), false);
-    assert.equal(panelVisible("player", "queue"), false);
+  it("hides the lights while the queue is open, and the reverse", () => {
+    assert.equal(panelVisible("queue", "lights"), false);
+    assert.equal(panelVisible("lights", "queue"), false);
   });
 });
 
 // ---------------------------------------------------------------------------
 
-describe("describeMiniPlayer", () => {
-  it("stays hidden on the Player tab, which already shows the track", () => {
-    const mini = describeMiniPlayer("player", frame(), station(), "Kitchen");
-    assert.equal(mini.visible, false);
+describe("describePlayerBar", () => {
+  it("describes a playing track", () => {
+    const bar = describePlayerBar(frame(), station(), "Kitchen");
+    assert.equal(bar.title, "Rocket Man");
+    assert.equal(bar.subtitle, "Now playing · Kitchen");
+    assert.equal(bar.live, true);
+    assert.equal(bar.idle, false);
   });
 
-  it("appears on the other tabs while a track is playing", () => {
-    for (const tab of ["queue", "lights"] as const) {
-      assert.equal(describeMiniPlayer(tab, frame(), station(), "Kitchen").visible, true);
+  it("shows a paused track without the equalizer running", () => {
+    const bar = describePlayerBar(frame({ state: "PAUSED_PLAYBACK" }), station(), "Kitchen");
+    assert.equal(bar.title, "Rocket Man");
+    assert.match(bar.subtitle, /^Paused/);
+    assert.equal(bar.live, false);
+    assert.equal(bar.idle, false);
+  });
+
+  it("names the speaker it would control when nothing is playing", () => {
+    // The bar is the only way into the player now, so an idle speaker cannot
+    // make it disappear — it becomes the invitation instead of the status.
+    const bar = describePlayerBar(frame({ state: "STOPPED" }), station(), "Kitchen");
+    assert.equal(bar.idle, true);
+    assert.equal(bar.title, NOTHING_PLAYING);
+    assert.equal(bar.subtitle, "Kitchen");
+    assert.equal(bar.live, false);
+  });
+
+  it("asks for a speaker when there is not one yet", () => {
+    // First run, and every run where discovery found nothing. The sheet behind
+    // this bar holds the speaker picker, so it is the thing to tap.
+    const bar = describePlayerBar(null, null, null);
+    assert.equal(bar.idle, true);
+    assert.equal(bar.title, NO_SPEAKER);
+    assert.ok(bar.subtitle.length > 0, "an empty second line collapses the row");
+  });
+
+  it("never renders the card's idle dash", () => {
+    // `NO_TRACK` is an em dash sized for a card with a label above it. On a bar
+    // whose whole job is to be tappable it reads as a broken row.
+    for (const state of ["PLAYING", "STOPPED"] as const) {
+      assert.notEqual(describePlayerBar(frame({ state }), station(), "Kitchen").title, NO_TRACK);
     }
+    assert.notEqual(describePlayerBar(null, null, null).title, NO_TRACK);
   });
 
-  it("stays hidden when the speaker is idle", () => {
-    // An empty bar sitting on top of the queue is worse than no bar.
-    const mini = describeMiniPlayer("queue", frame({ state: "STOPPED" }), station(), "Kitchen");
-    assert.equal(mini.visible, false);
-  });
-
-  it("stays hidden when there is no speaker at all", () => {
-    assert.equal(describeMiniPlayer("queue", null, null, null).visible, false);
-  });
-
-  it("shows a paused track", () => {
-    // Paused is when getting back to the transport controls matters most, so
-    // the one control that goes there must not be the thing that disappears.
-    const mini = describeMiniPlayer(
-      "queue",
-      frame({ state: "PAUSED_PLAYBACK" }),
-      station(),
-      "Kitchen",
+  it("drops the artwork when nothing is playing", () => {
+    // A stopped station still lists its tracks, so the cursor still resolves to
+    // a thumbnail — one that would sit next to "Nothing playing" and claim the
+    // song is on.
+    assert.equal(describePlayerBar(frame({ state: "STOPPED" }), station(), "Kitchen").thumbnail, null);
+    assert.equal(
+      describePlayerBar(frame(), station(), "Kitchen").thumbnail,
+      "https://i.ytimg.com/vi/abc123/hq.jpg",
     );
-    assert.equal(mini.visible, true);
-    assert.equal(mini.live, false);
-    assert.match(mini.subtitle, /^Paused/);
   });
 
-  it("marks a playing track live", () => {
-    const mini = describeMiniPlayer("queue", frame(), station(), "Kitchen");
-    assert.equal(mini.live, true);
-    assert.equal(mini.title, "Rocket Man");
-    assert.equal(mini.subtitle, "Now playing · Kitchen");
-  });
-
-  it("never renders the idle placeholder as a title", () => {
-    // The bar is hidden when idle, so `NO_TRACK` reaching it would mean the
-    // visibility rule and the title came from different states.
-    for (const tab of TABS) {
-      const mini = describeMiniPlayer(tab, frame({ state: "STOPPED" }), station(), "Kitchen");
-      assert.ok(!mini.visible || mini.title !== NO_TRACK);
-    }
+  it("prefers the speaker the frame came from over the selected one", () => {
+    // The two disagree for one stream teardown after the user switches rooms,
+    // and the frame is the one describing audible sound.
+    const bar = describePlayerBar(frame({ device: "Office" }), station(), "Kitchen");
+    assert.equal(bar.subtitle, "Now playing · Office");
+    const idle = describePlayerBar(frame({ state: "STOPPED", device: "Office" }), null, "Kitchen");
+    assert.equal(idle.subtitle, "Office");
   });
 });
 

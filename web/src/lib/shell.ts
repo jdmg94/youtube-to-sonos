@@ -1,13 +1,14 @@
 /**
- * The shell's view model: which panels a phone shows, and what the mini player
- * says when it does.
+ * The shell's view model: which panels a phone shows, and what the player bar
+ * says above them.
  *
  * The app has two layouts and one DOM. Above 900px every panel is on screen at
- * once in two columns; below it the same panels are split across three tabs and
- * only one tab's worth is visible. That split is expressed here as data — a
- * panel-to-tab map — rather than as a second component tree, because two trees
- * would mean two `NowPlayingCard`s subscribing to the same speaker and two
- * `StreamController`s holding two half-typed URLs.
+ * once in two columns; below it the browsing panels are split across two tabs
+ * and the player is a sheet that slides over whichever one is showing. That
+ * split is expressed here as data — a panel-to-tab map — rather than as a
+ * second component tree, because two trees would mean two `NowPlayingCard`s
+ * subscribing to the same speaker and two `StreamController`s holding two
+ * half-typed URLs.
  *
  * A `.ts` file, like the other view models, so Node can test it without a JSX
  * transform.
@@ -16,62 +17,67 @@ import { hasStation, type NowPlaying, type StationBody } from "@/lib/api/types";
 import { describeNowPlaying } from "@/lib/now-playing";
 
 /**
- * The three phone tabs.
+ * The two phone tabs.
  *
  * Meaningless above the breakpoint — everything is visible there — but the
  * value is still tracked, because the viewport can cross the breakpoint mid
  * session (a rotation, a resized window) and arriving on a tab the user never
  * chose is worse than arriving on the one they left.
+ *
+ * There is no `player` here any more: playback is a sheet reachable from every
+ * tab, not a place you navigate away from the queue to visit. A phone that
+ * still has `"player"` under the storage key is caught by `isAppTab` and lands
+ * on `DEFAULT_TAB`.
  */
-export type AppTab = "player" | "queue" | "lights";
+export type AppTab = "queue" | "lights";
 
-/** Source order for the tab bar. Player first: it is where playback lives. */
-export const TABS: readonly AppTab[] = ["player", "queue", "lights"];
+/** Source order for the tab bar. Queue first: it is what the app is for. */
+export const TABS: readonly AppTab[] = ["queue", "lights"];
 
 export const TAB_LABEL: Record<AppTab, string> = {
-  player: "Player",
   queue: "Queue",
   lights: "Lights",
 };
 
-export const DEFAULT_TAB: AppTab = "player";
+export const DEFAULT_TAB: AppTab = "queue";
 
 /**
  * Whether a value off the wire — here, `localStorage` — is a tab.
  *
  * The tab is persisted, so the stored value survives a release that renames or
- * drops one. Without this guard a stale `"lights"` from an older build renders
- * a phone screen with every panel hidden and no error: the tab bar would
- * highlight nothing and the page would be blank.
+ * drops one, which is exactly what dropping the Player tab did. Without this
+ * guard a stale `"player"` from an older build renders a phone screen with
+ * every panel hidden and no error: the tab bar would highlight nothing and the
+ * page would be blank.
  */
 export function isAppTab(value: unknown): value is AppTab {
   return typeof value === "string" && (TABS as readonly string[]).includes(value);
 }
 
 /**
- * The four sections the shell places, in DOM order.
+ * The three tabbed sections the shell places, in DOM order.
  *
- * `player` is the speaker picker, the now-playing card and the volume slider
- * together — they are one card on both layouts, so they are one panel here.
+ * The player — speaker picker, now-playing card and volume slider — is
+ * deliberately absent. It is one panel on the desktop sidebar and a sheet over
+ * everything on a phone, so it belongs to no tab and is never hidden by one.
  */
-export type Panel = "player" | "lights" | "stream" | "queue";
+export type Panel = "lights" | "stream" | "queue";
 
 /**
  * Which tab each panel belongs to on a phone.
  *
  * This *is* the information architecture, and it is why it is a constant rather
  * than a chain of conditions in JSX. The entry that is not its own name is the
- * one that needed deciding: `stream` — the paste-a-URL form — is under **Queue**,
- * not Player. Pasting a URL and then looking at what it queued are one task;
- * the transport controls are a different one.
+ * one that needed deciding: `stream` — the paste-a-URL form — is under
+ * **Queue**, because pasting a URL and then looking at what it queued are one
+ * task.
  *
  * The order of the keys is also load-bearing. Both layouts render one DOM in
- * this sequence: on desktop the first two are the sidebar and the last two the
- * main column, and on a phone the column wrappers collapse to `display:
- * contents` so all four become siblings in exactly this order.
+ * this sequence: on desktop `lights` closes the sidebar and the last two are
+ * the main column, and on a phone the column wrappers collapse to `display:
+ * contents` so all three become siblings in exactly this order.
  */
 export const PANEL_TAB: Record<Panel, AppTab> = {
-  player: "player",
   lights: "lights",
   stream: "queue",
   queue: "queue",
@@ -87,44 +93,70 @@ export function panelVisible(panel: Panel, tab: AppTab): boolean {
   return PANEL_TAB[panel] === tab;
 }
 
-export interface MiniPlayerView {
-  /** Render nothing at all when false — the bar reserves layout space. */
-  visible: boolean;
+/** The bar's title when a speaker is chosen but silent. */
+export const NOTHING_PLAYING = "Nothing playing";
+
+/** The bar's title before there is a speaker to play on at all. */
+export const NO_SPEAKER = "No speaker selected";
+
+/** The second line under `NO_SPEAKER`. The sheet behind the bar has the picker. */
+export const PICK_SPEAKER = "Tap to choose one";
+
+export interface PlayerBarView {
   title: string;
-  /** `Now playing · Kitchen`. Reuses the card's label, so the two agree. */
+  /** `Now playing · Kitchen` when there is a track, the room alone when not. */
   subtitle: string;
   /** `null` renders the music-note placeholder. */
   thumbnail: string | null;
   /** Audible right now, as opposed to paused. Drives the equalizer. */
   live: boolean;
+  /** Nothing to show: the bar is an invitation rather than a status. */
+  idle: boolean;
 }
 
 /**
- * The bar that follows the listener off the Player tab.
+ * The bar pinned above the tabs, and the only way into the player sheet.
  *
- * Visible when there is a track *and* the Player tab is not already showing
- * one. Both halves matter: without the first it is an empty bar covering the
- * queue, and without the second it is a duplicate of the card directly above
- * it, stealing a phone screen's worth of space from the thing the user came to
- * look at.
+ * It has no `visible` field because it has no hidden state. The player used to
+ * be a tab and this bar the reminder of it, so it could afford to disappear
+ * whenever there was nothing to remind you of; now it is the door, and a door
+ * that vanishes when the room is empty leaves a phone with no route to the
+ * speaker picker, the volume slider, or a paused track's Play button.
+ *
+ * Idle is a different sentence, not a blank one. `describeNowPlaying`'s own
+ * idle title is an em dash sized for a card with a label above it, which on a
+ * single tappable row reads as a broken cell — so the two strings below are the
+ * bar's own, and the artwork is dropped with them: a stopped station still
+ * lists its tracks, and the cursor's thumbnail beside "Nothing playing" claims
+ * a song is on.
  *
  * Paused counts as a track. A paused speaker is the case where getting back to
- * the transport controls is most urgent, and hiding the one control that takes
- * you there is exactly backwards.
+ * the transport controls is most urgent, and the row that takes you there must
+ * not be the thing that changes.
  */
-export function describeMiniPlayer(
-  tab: AppTab,
+export function describePlayerBar(
   nowPlaying: NowPlaying | null | undefined,
   station: StationBody | null | undefined,
   deviceName: string | null,
-): MiniPlayerView {
+): PlayerBarView {
   const view = describeNowPlaying(nowPlaying, deviceName);
+
+  if (view.mode === "idle") {
+    return {
+      title: view.device ? NOTHING_PLAYING : NO_SPEAKER,
+      subtitle: view.device ?? PICK_SPEAKER,
+      thumbnail: null,
+      live: false,
+      idle: true,
+    };
+  }
+
   return {
-    visible: view.mode !== "idle" && tab !== "player",
     title: view.title,
     subtitle: view.label,
     thumbnail: currentArtwork(station),
     live: view.mode === "playing",
+    idle: false,
   };
 }
 

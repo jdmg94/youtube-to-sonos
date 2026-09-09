@@ -51,6 +51,16 @@ export interface NowPlayingView {
   /** `Now playing · Kitchen`. Carries the room, so it is never just a verb. */
   label: string;
   title: string;
+  /**
+   * The room, on its own — the same name `label` ends with, for callers that
+   * need it as a separate line rather than inside a sentence. `null` when
+   * nothing is selected and no frame has named one.
+   *
+   * Published rather than re-derived by those callers: the precedence below
+   * (the frame's own `device` beats the selection) is a rule with a reason, and
+   * a second copy of it is a second thing to get wrong.
+   */
+  device: string | null;
 }
 
 /**
@@ -70,11 +80,14 @@ export function describeNowPlaying(
   nowPlaying: NowPlaying | null | undefined,
   deviceName: string | null,
 ): NowPlayingView {
-  const device = nowPlaying && present(nowPlaying.device) ? nowPlaying.device : deviceName;
-  const suffix = present(device) ? ` · ${device}` : "";
+  const named = nowPlaying && present(nowPlaying.device) ? nowPlaying.device : deviceName;
+  // `present` also rejects the empty string a `deviceName` of `""` would carry
+  // through, so the published field is never a name that renders as nothing.
+  const device = present(named) ? named : null;
+  const suffix = device ? ` · ${device}` : "";
 
   if (!nowPlaying || !ENGAGED_STATES.includes(nowPlaying.state)) {
-    return { mode: "idle", label: `Idle${suffix}`, title: NO_TRACK };
+    return { mode: "idle", label: `Idle${suffix}`, title: NO_TRACK, device };
   }
 
   const paused = nowPlaying.state === "PAUSED_PLAYBACK";
@@ -82,6 +95,7 @@ export function describeNowPlaying(
     mode: paused ? "paused" : "playing",
     label: `${paused ? "Paused" : "Now playing"}${suffix}`,
     title: trackTitle(nowPlaying.title),
+    device,
   };
 }
 

@@ -145,15 +145,20 @@
      in @theme: nothing needs a `h-tab-bar` utility, and both are used inside
      `calc()` alongside `env(safe-area-inset-bottom)` anyway. */
   --tab-bar: 4rem;
-  --mini-player: 4.5rem;
+  --player-bar: 4.5rem;
 
   /* How far a toast sits off the bottom of the screen.
      Sonner writes its offsets as *inline* CSS variables on its container, so a
      Tailwind class cannot override them and a plain value cannot be responsive
      — but a value that is itself a custom property can be, which is what this
-     is. Phones need to clear the tab bar; above the breakpoint the bar does not
-     exist and this collapses to an ordinary margin. */
-  --toast-bottom: calc(var(--tab-bar) + env(safe-area-inset-bottom) + 0.75rem);
+     is. Phones need to clear both bars; above the breakpoint neither exists
+     and this collapses to an ordinary margin.
+     The player bar is in the sum now that it is permanent. It used to hide
+     itself whenever nothing was playing, so a toast could sit in its place;
+     covering it today would cover the only way into the player. */
+  --toast-bottom: calc(
+    var(--tab-bar) + var(--player-bar) + env(safe-area-inset-bottom) + 0.75rem
+  );
 
   --sidebar: rgba(20, 27, 45, 0.65);
   --sidebar-foreground: #f3f4f6;
@@ -166,10 +171,24 @@
 }
 
 /* The breakpoint the whole shell turns on. Above it there is no tab bar and no
-   mini player, so a toast has nothing to clear. */
+   player bar, so a toast has nothing to clear. */
 @media (min-width: 901px) {
   :root {
     --toast-bottom: 1.5rem;
+  }
+}
+
+/* The page behind an open player sheet.
+   An attribute rather than an inline style because the speaker picker inside
+   that sheet is a Radix dialog, which locks scrolling by writing `<body>`'s
+   inline `overflow` and restoring whatever it found on close — two owners of
+   one property, whose loser leaves the page unscrollable for good.
+   Scoped to the phone layout because that is where the sheet is modal: above
+   the breakpoint the same element is the sidebar's player panel, and locking
+   the page around it would be a bug with no dialog on screen to explain it. */
+@media (max-width: 900px) {
+  body[data-player-sheet="open"] {
+    overflow: hidden;
   }
 }
 
@@ -278,6 +297,41 @@
     backdrop-filter: blur(16px);
     -webkit-backdrop-filter: blur(16px);
     border-top: 1px solid var(--border);
+  }
+
+  /* The player sheet's slide, and the one part of it a utility cannot say.
+
+     `visibility` is what takes the closed sheet out of the tab order —
+     `translate-y-full` alone parks it off-screen still focusable — but it must
+     not be *transitioned*. A transitioned property still reports its old value
+     on the transition's first frame, and the sheet is focused from the effect
+     that opens it: `focus()` on a `visibility: hidden` element is a silent
+     no-op, so the sheet opened with focus left on the bar behind it and no
+     Escape, no focus trap and nothing announced.
+
+     Instead visibility switches instantly, and is delayed on the way *out*
+     only — just long enough for the slide-out to finish before the sheet stops
+     being painted. Delaying one property and not the other is why this is a
+     rule here rather than two classes on the element. */
+  .player-sheet {
+    transition:
+      transform 300ms ease-out,
+      visibility 0s linear 300ms;
+  }
+
+  .player-sheet[data-state="open"] {
+    transition:
+      transform 300ms ease-out,
+      visibility 0s;
+  }
+
+  /* Above the breakpoint the same element is the sidebar's player panel:
+     static, always visible, and with nothing to slide. */
+  @media (min-width: 901px) {
+    .player-sheet,
+    .player-sheet[data-state="open"] {
+      transition: none;
+    }
   }
 
   /* A scrollbar for a list inside a glass panel: the platform default is an

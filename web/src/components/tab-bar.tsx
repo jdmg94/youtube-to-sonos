@@ -1,6 +1,6 @@
 "use client";
 
-import { AudioLines, Lightbulb, ListMusic } from "lucide-react";
+import { Lightbulb, ListMusic } from "lucide-react";
 
 import { TABS, TAB_LABEL, type AppTab } from "@/lib/shell";
 import { cn } from "@/lib/utils";
@@ -12,10 +12,13 @@ import { cn } from "@/lib/utils";
  * A `tablist` rather than a nav of links: these switch which panels are visible
  * on a single-page client app, they do not change the URL, and calling them
  * links would promise a back button that does not exist.
+ *
+ * Two tabs, not three. The player is a sheet reached from the row above this
+ * bar, because it is the one section you want to reach *without* leaving what
+ * you were looking at — pausing a song should not close the queue you were
+ * reading. `PANEL_TAB` is where that split is actually stated.
  */
-const TAB_ICON: Record<AppTab, typeof AudioLines> = {
-  // The equalizer motif the now-playing card already uses for "audible".
-  player: AudioLines,
+const TAB_ICON: Record<AppTab, typeof ListMusic> = {
   queue: ListMusic,
   lights: Lightbulb,
 };
