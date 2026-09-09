@@ -24,19 +24,19 @@ import { describeNowPlaying } from "@/lib/now-playing";
  * session (a rotation, a resized window) and arriving on a tab the user never
  * chose is worse than arriving on the one they left.
  *
- * There is no `player` here any more: playback is a sheet reachable from every
- * tab, not a place you navigate away from the queue to visit. A phone that
- * still has `"player"` under the storage key is caught by `isAppTab` and lands
- * on `DEFAULT_TAB`.
+ * There is no `player` here: playback is a sheet reachable from every tab, not
+ * a place you navigate away from the queue to visit. `settings` is where the
+ * two things you configure once and then forget live — which speaker, which
+ * lamps — and it is the reason there is no `lights` tab either.
  */
-export type AppTab = "queue" | "lights";
+export type AppTab = "queue" | "settings";
 
 /** Source order for the tab bar. Queue first: it is what the app is for. */
-export const TABS: readonly AppTab[] = ["queue", "lights"];
+export const TABS: readonly AppTab[] = ["queue", "settings"];
 
 export const TAB_LABEL: Record<AppTab, string> = {
   queue: "Queue",
-  lights: "Lights",
+  settings: "Settings",
 };
 
 export const DEFAULT_TAB: AppTab = "queue";
@@ -45,40 +45,71 @@ export const DEFAULT_TAB: AppTab = "queue";
  * Whether a value off the wire — here, `localStorage` — is a tab.
  *
  * The tab is persisted, so the stored value survives a release that renames or
- * drops one, which is exactly what dropping the Player tab did. Without this
- * guard a stale `"player"` from an older build renders a phone screen with
- * every panel hidden and no error: the tab bar would highlight nothing and the
- * page would be blank.
+ * drops one, which both of the last two releases did. Without this guard a
+ * stale id from an older build renders a phone screen with every panel hidden
+ * and no error: the tab bar would highlight nothing and the page would be
+ * blank.
  */
 export function isAppTab(value: unknown): value is AppTab {
   return typeof value === "string" && (TABS as readonly string[]).includes(value);
 }
 
 /**
- * The three tabbed sections the shell places, in DOM order.
+ * Retired tab ids, and where the tab that replaced them lives now.
  *
- * The player — speaker picker, now-playing card and volume slider — is
- * deliberately absent. It is one panel on the desktop sidebar and a sheet over
- * everything on a phone, so it belongs to no tab and is never hidden by one.
+ * Only for a tab that was *renamed* — one whose contents are still reachable
+ * somewhere. `lights` qualifies: the Hue panel did not go anywhere, it acquired
+ * a speaker picker and a broader name. `player` deliberately does not: playback
+ * stopped being a destination altogether, so there is no tab that means what it
+ * meant, and `readTab` drops those installs on the default instead of inventing
+ * an answer.
  */
-export type Panel = "lights" | "stream" | "queue";
+const RENAMED_TAB: Record<string, AppTab> = {
+  lights: "settings",
+};
+
+/**
+ * The tab to render, given whatever was under the storage key.
+ *
+ * Every caller wants this rather than `isAppTab` alone: the guard answers
+ * "is this still a tab", and the two useful answers for a stored value that is
+ * not — follow the rename, or fall back — both live here so a component cannot
+ * implement half of them.
+ */
+export function readTab(stored: unknown): AppTab {
+  if (isAppTab(stored)) return stored;
+  if (typeof stored === "string" && stored in RENAMED_TAB) return RENAMED_TAB[stored];
+  return DEFAULT_TAB;
+}
+
+/**
+ * The four tabbed sections the shell places, in DOM order.
+ *
+ * The player — the now-playing card and the volume slider — is deliberately
+ * absent. It is one panel on the desktop sidebar and a sheet over everything on
+ * a phone, so it belongs to no tab and is never hidden by one.
+ */
+export type Panel = "speaker" | "lights" | "stream" | "queue";
 
 /**
  * Which tab each panel belongs to on a phone.
  *
  * This *is* the information architecture, and it is why it is a constant rather
- * than a chain of conditions in JSX. The entry that is not its own name is the
- * one that needed deciding: `stream` — the paste-a-URL form — is under
- * **Queue**, because pasting a URL and then looking at what it queued are one
- * task.
+ * than a chain of conditions in JSX. Two entries are not their own name, and
+ * both are the pairings that needed deciding: `stream` — the paste-a-URL form —
+ * is under **Queue**, because pasting a URL and then looking at what it queued
+ * are one task; and `speaker` — the picker — is under **Settings** beside the
+ * lights, because which box the sound comes out of is chosen about as often as
+ * which lamps follow it.
  *
  * The order of the keys is also load-bearing. Both layouts render one DOM in
- * this sequence: on desktop `lights` closes the sidebar and the last two are
- * the main column, and on a phone the column wrappers collapse to `display:
- * contents` so all three become siblings in exactly this order.
+ * this sequence: on desktop the first two close the sidebar and the last two
+ * are the main column, and on a phone the column wrappers collapse to `display:
+ * contents` so all four become siblings in exactly this order.
  */
 export const PANEL_TAB: Record<Panel, AppTab> = {
-  lights: "lights",
+  speaker: "settings",
+  lights: "settings",
   stream: "queue",
   queue: "queue",
 };
@@ -99,8 +130,19 @@ export const NOTHING_PLAYING = "Nothing playing";
 /** The bar's title before there is a speaker to play on at all. */
 export const NO_SPEAKER = "No speaker selected";
 
-/** The second line under `NO_SPEAKER`. The sheet behind the bar has the picker. */
-export const PICK_SPEAKER = "Tap to choose one";
+/**
+ * The second line under `NO_SPEAKER`.
+ *
+ * Names the tab rather than saying "tap". The picker used to be the first thing
+ * inside the sheet this bar opens, so tapping the bar *was* the instruction; it
+ * now sits under Settings, and a bar that says "tap to choose one" and then
+ * opens a sheet with no picker in it is worse than one that says nothing.
+ *
+ * The tab name is written out rather than interpolated from `TAB_LABEL`, so
+ * that renaming the tab breaks a test instead of silently rewriting this
+ * sentence into one nobody reviewed.
+ */
+export const PICK_SPEAKER = "Choose one in Settings";
 
 export interface PlayerBarView {
   title: string;
@@ -121,7 +163,7 @@ export interface PlayerBarView {
  * be a tab and this bar the reminder of it, so it could afford to disappear
  * whenever there was nothing to remind you of; now it is the door, and a door
  * that vanishes when the room is empty leaves a phone with no route to the
- * speaker picker, the volume slider, or a paused track's Play button.
+ * volume slider or a paused track's Play button.
  *
  * Idle is a different sentence, not a blank one. `describeNowPlaying`'s own
  * idle title is an em dash sized for a card with a label above it, which on a

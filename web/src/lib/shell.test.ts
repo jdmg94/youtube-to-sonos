@@ -14,12 +14,14 @@ import {
   NOTHING_PLAYING,
   NO_SPEAKER,
   PANEL_TAB,
+  PICK_SPEAKER,
   TABS,
   TAB_LABEL,
   currentArtwork,
   describePlayerBar,
   isAppTab,
   panelVisible,
+  readTab,
   type Panel,
 } from "@/lib/shell";
 
@@ -59,7 +61,7 @@ function station(overrides: Partial<StationBody> = {}): StationBody {
   return { index: 0, exhausted: false, tracks: [track()], ...overrides };
 }
 
-const ALL_PANELS: readonly Panel[] = ["lights", "stream", "queue"];
+const ALL_PANELS: readonly Panel[] = ["speaker", "lights", "stream", "queue"];
 
 // ---------------------------------------------------------------------------
 
@@ -81,17 +83,47 @@ describe("tabs", () => {
     // `usePersistedState` JSON-parses whatever is under the key. A release that
     // renamed a tab, another tab of the app, or a user in devtools can all put
     // any of these there.
-    for (const junk of [null, undefined, "", "Queue", "settings", 0, {}, ["queue"]]) {
+    for (const junk of [null, undefined, "", "Queue", "Settings", 0, {}, ["queue"]]) {
       assert.equal(isAppTab(junk), false, `${JSON.stringify(junk)} accepted as a tab`);
     }
     for (const tab of TABS) assert.equal(isAppTab(tab), true);
   });
+});
 
-  it("sends a phone still storing the old Player tab somewhere real", () => {
-    // The player is a sheet now, not a tab. Every install that used the tabbed
-    // build has `"player"` under the storage key, and without this the bar
-    // would highlight nothing over a screen with every panel hidden.
+describe("readTab", () => {
+  it("hands back a tab it recognises unchanged", () => {
+    for (const tab of TABS) assert.equal(readTab(tab), tab);
+  });
+
+  it("falls back rather than returning something unrenderable", () => {
+    // Every one of these renders a phone with the bar highlighting nothing over
+    // a screen with every panel hidden, and none of them throws on the way.
+    for (const junk of [null, undefined, "", "Queue", 0, {}, ["queue"]]) {
+      assert.equal(readTab(junk), DEFAULT_TAB, `${JSON.stringify(junk)} did not fall back`);
+    }
+  });
+
+  it("sends a phone still storing the retired Player tab somewhere real", () => {
+    // The player became a sheet rather than moving, so there is no tab that
+    // means what `"player"` meant. Landing on the default is the whole fix.
     assert.equal(isAppTab("player"), false);
+    assert.equal(readTab("player"), DEFAULT_TAB);
+  });
+
+  it("carries a phone left on Lights to the tab that absorbed it", () => {
+    // This one is a rename, not a removal: everything the Lights tab showed is
+    // still there under Settings. Dropping these installs on Queue would be
+    // losing information we have.
+    assert.equal(isAppTab("lights"), false, "the old id must not pass the guard");
+    assert.equal(readTab("lights"), "settings");
+  });
+
+  it("only ever renames onto a tab that exists", () => {
+    // The rename table is the one place a typo produces a stored value that
+    // passes through `readTab` and then renders nothing.
+    for (const old of ["player", "lights"]) {
+      assert.ok(TABS.includes(readTab(old)), `${old} maps outside TABS`);
+    }
   });
 });
 
@@ -119,12 +151,18 @@ describe("PANEL_TAB", () => {
     assert.equal(PANEL_TAB.stream, PANEL_TAB.queue);
   });
 
+  it("keeps the speaker picker with the lights", () => {
+    // The other deliberate pairing: which speaker and which lamps are both
+    // "set this up once", and neither belongs next to a track you are playing.
+    assert.equal(PANEL_TAB.speaker, PANEL_TAB.lights);
+  });
+
   it("lists the panels in the order both layouts render them", () => {
     // The phone layout is the desktop DOM with the column wrappers collapsed to
     // `display: contents`, so key order here is the stacking order there. A
     // reordering that put Lights between the two Queue panels would interleave
     // two tabs' worth of markup and could not be expressed by hiding panels.
-    assert.deepEqual(Object.keys(PANEL_TAB), ["lights", "stream", "queue"]);
+    assert.deepEqual(Object.keys(PANEL_TAB), ["speaker", "lights", "stream", "queue"]);
   });
 
   it("groups each tab's panels contiguously", () => {
@@ -159,9 +197,10 @@ describe("panelVisible", () => {
     }
   });
 
-  it("hides the lights while the queue is open, and the reverse", () => {
-    assert.equal(panelVisible("queue", "lights"), false);
+  it("hides the settings while the queue is open, and the reverse", () => {
+    assert.equal(panelVisible("queue", "settings"), false);
     assert.equal(panelVisible("lights", "queue"), false);
+    assert.equal(panelVisible("speaker", "queue"), false);
   });
 });
 
@@ -195,12 +234,21 @@ describe("describePlayerBar", () => {
   });
 
   it("asks for a speaker when there is not one yet", () => {
-    // First run, and every run where discovery found nothing. The sheet behind
-    // this bar holds the speaker picker, so it is the thing to tap.
+    // First run, and every run where discovery found nothing.
     const bar = describePlayerBar(null, null, null);
     assert.equal(bar.idle, true);
     assert.equal(bar.title, NO_SPEAKER);
+    assert.equal(bar.subtitle, PICK_SPEAKER);
     assert.ok(bar.subtitle.length > 0, "an empty second line collapses the row");
+  });
+
+  it("points at the tab that actually holds the picker", () => {
+    // The picker used to be inside the sheet this bar opens, and the copy said
+    // "tap". It is under Settings now, so the sentence names the tab — and it
+    // is built from `TAB_LABEL` here so renaming that tab fails this test
+    // rather than quietly leaving the bar directing people to a tab that is
+    // gone. Nothing else in the app would notice.
+    assert.match(PICK_SPEAKER, new RegExp(TAB_LABEL.settings));
   });
 
   it("never renders the card's idle dash", () => {

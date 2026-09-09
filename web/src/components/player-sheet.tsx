@@ -15,8 +15,8 @@ import { cn } from "@/lib/utils";
  * after the unprefixed utility it is undoing.
  *
  * Deliberately not a Radix `Dialog`, which is what a sheet would normally be.
- * A Dialog mounts its content on open, and the three things in here do not
- * survive that: `VolumePanel` renders nothing until its first read of the
+ * A Dialog mounts its content on open, and neither of the two things in here
+ * survives that: `VolumePanel` renders nothing until its first read of the
  * speaker lands, so every open would flash an empty slider, and
  * `NowPlayingCard` holds the `useTrackChange` subscription that raises the
  * "Now playing" toast — a component that only exists while the sheet is open
@@ -61,12 +61,14 @@ export function PlayerSheet({
    * The page behind a sheet must not scroll, and this says so with an
    * attribute instead of `body.style.overflow`.
    *
-   * The speaker picker inside this sheet is a Radix dialog, and Radix locks
+   * The speaker picker one panel over is a Radix dialog, and Radix locks
    * scrolling by writing inline styles on `<body>` and restoring what it found
    * on close. Two owners of one inline property is a race whose loser leaves
    * the page permanently unscrollable; an attribute is a lane nothing else
-   * writes to. The rule that reads it is scoped to the phone layout, so this
-   * cannot lock a desktop page even if `open` is somehow true there.
+   * writes to. That the picker no longer sits *inside* this sheet does not
+   * retire the argument — both still lock the same one `<body>`. The rule that
+   * reads this is scoped to the phone layout, so it cannot lock a desktop page
+   * even if `open` is somehow true there.
    */
   useEffect(() => {
     if (!open) return;
@@ -123,8 +125,9 @@ export function PlayerSheet({
         tabIndex={open ? -1 : undefined}
         // Read by `.player-sheet` in globals.css, which needs the two states to
         // transition `visibility` differently and cannot get that from a class
-        // pair. Named after Radix's own attribute, since the speaker picker
-        // inside this sheet is styled off exactly that.
+        // pair. Named after Radix's own attribute, so that the one sheet on
+        // this page which is a Radix dialog — the speaker picker — and the one
+        // that is not can be reasoned about with the same vocabulary.
         data-state={open ? "open" : "closed"}
         onKeyDown={(event) => {
           if (!open) return;
@@ -215,9 +218,9 @@ const FOCUSABLE = [
  * queue behind the scrim: still focusable, visually covered, and impossible to
  * see what you are about to activate.
  *
- * The nested speaker picker needs no special case — it is a Radix dialog in a
- * portal, so while it is open focus is outside this element and these events
- * never arrive here.
+ * Nothing in here opens a dialog of its own any more — the speaker picker,
+ * which did, has moved out to its own panel — so this trap only ever has the
+ * sheet's own controls to walk.
  */
 function trapTab(event: KeyboardEvent<HTMLElement>) {
   const panel = event.currentTarget;

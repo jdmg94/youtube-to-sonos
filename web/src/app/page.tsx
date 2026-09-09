@@ -19,8 +19,8 @@ import { useSpeaker } from "@/lib/hooks/use-speaker";
 import {
   DEFAULT_TAB,
   describePlayerBar,
-  isAppTab,
   panelVisible,
+  readTab,
   type AppTab,
   type Panel,
 } from "@/lib/shell";
@@ -38,8 +38,8 @@ const TAB_KEY = "yts.tab";
  * otherwise.
  *
  * Two layouts, one DOM. Above 900px this is a sidebar and a main column with
- * everything on screen at once; below it three of the four panels are split
- * across two tabs and the fourth — the player — is a sheet that slides over
+ * everything on screen at once; below it the four panels are split across two
+ * tabs and the player — which is not a panel — is a sheet that slides over
  * whichever tab is showing. The phone layout is not a second tree — the column
  * wrappers collapse to `display: contents` and the panels for the other tab
  * are hidden — because a second tree would mean two `useEvents` subscriptions
@@ -59,14 +59,15 @@ export default function Home() {
   const { nowPlaying, station } = useEvents(selected?.ip ?? null);
 
   /*
-   * Persisted, and validated on the way out. The tab is where someone left the
-   * app, and `isAppTab` is what stops a stale value in an older build's storage
-   * rendering a phone screen with every panel hidden and no error anywhere —
-   * which is exactly what every install carrying the retired `"player"` tab
-   * would otherwise do on its next visit.
+   * Persisted, and read through `readTab` rather than used raw. The tab is
+   * where someone left the app, and a stale id from an older build renders a
+   * phone screen with every panel hidden and no error anywhere. The last two
+   * releases both retired one: `player` became a sheet, `lights` grew into
+   * Settings — and `readTab` knows that the second has somewhere to land and
+   * the first does not.
    */
   const [stored, setTab] = usePersistedState<AppTab>(TAB_KEY, DEFAULT_TAB);
-  const tab = isAppTab(stored) ? stored : DEFAULT_TAB;
+  const tab = readTab(stored);
 
   /*
    * The player sheet, and deliberately *not* persisted alongside the tab.
@@ -94,8 +95,21 @@ export default function Home() {
        * internally instead of pushing the page taller than the viewport — a
        * flex/grid child defaults to a min-content floor, which silently defeats
        * `overflow-y: auto` further down.
+       *
+       * `content-start` on the phone layout, and only there. This grid is
+       * `flex-1`, so on a tab whose panels do not fill the screen it is taller
+       * than its own rows — and a grid's default `align-content` shares that
+       * slack out over every `auto` row, which is not padding anybody chose.
+       * Measured on the Settings tab: 77px added to each of three rows, which
+       * turned the 68px speaker panel into a 145px one. Pushing the rows to
+       * the top instead leaves the leftover as one piece of background below
+       * the last panel, where it reads as the end of the page.
+       *
+       * Above 900px the stretch is the point and this must not apply: the two
+       * `Column`s are grid items that scroll internally, and a column sized to
+       * its content rather than to the viewport has nothing to scroll within.
        */}
-      <main className="grid w-full min-h-0 max-w-[1200px] flex-1 grid-cols-1 gap-4 px-4 pb-8 [&>*]:min-h-0 min-[601px]:gap-6 min-[601px]:px-6 min-[901px]:grid-cols-[340px_1fr] min-[901px]:pb-6">
+      <main className="grid w-full min-h-0 max-w-[1200px] flex-1 grid-cols-1 gap-4 px-4 pb-8 [&>*]:min-h-0 max-[900px]:content-start min-[601px]:gap-6 min-[601px]:px-6 min-[901px]:grid-cols-[340px_1fr] min-[901px]:pb-6">
         {/*
          * On desktop the *column* scrolls, not the queue inside it. The panels
          * above are `shrink-0`, so when the viewport is short something has to
@@ -118,6 +132,29 @@ export default function Home() {
            * is its position on screen.
            */}
           <PlayerSheet open={playerOpen} onClose={closePlayer} className="gap-4">
+            <NowPlayingCard device={selected} nowPlaying={nowPlaying} station={station} />
+            <VolumePanel device={selected} />
+          </PlayerSheet>
+
+          {/*
+           * The speaker picker used to be the first thing inside the sheet.
+           * It is here instead because choosing a box to play on is not part
+           * of playing — it is the same once-a-week decision as choosing which
+           * lamps follow the music, and the two now sit together under
+           * Settings. One DOM position serves both layouts, as ever: the sheet
+           * above is `fixed` on a phone and so its neighbours mean nothing
+           * there, and `static` above 900px, where this lands directly beneath
+           * it in the sidebar.
+           *
+           * `p-3` rather than the default `p-5`: this panel is a single 44px
+           * row, and a full panel's padding around one row reads as an empty
+           * box with something small lost in the middle. No heading either —
+           * the row already says "Controlling Kitchen".
+           *
+           * That padding only survives because the grid above is
+           * `max-[900px]:content-start`; see the comment there.
+           */}
+          <Section panel="speaker" tab={tab} className="p-3">
             <SpeakerDialog
               devices={devices}
               loading={loading}
@@ -129,9 +166,7 @@ export default function Home() {
                 toast.success(`Selected speaker: ${device.name}`);
               }}
             />
-            <NowPlayingCard device={selected} nowPlaying={nowPlaying} station={station} />
-            <VolumePanel device={selected} />
-          </PlayerSheet>
+          </Section>
 
           {/*
            * Never unmounted, only hidden — the Section below applies a
