@@ -17,7 +17,6 @@ import {
   PICK_SPEAKER,
   TABS,
   TAB_LABEL,
-  currentArtwork,
   describePlayerBar,
   isAppTab,
   panelVisible,
@@ -281,36 +280,6 @@ describe("describePlayerBar", () => {
   });
 });
 
-describe("currentArtwork", () => {
-  it("prefers the station thumbnail over the speaker's album art", () => {
-    // `album_art` points at STREAM_HOST, an address picked for the speakers and
-    // never checked against the browser.
-    assert.equal(currentArtwork(station()), "https://i.ytimg.com/vi/abc123/hq.jpg");
-  });
-
-  it("follows the cursor rather than assuming the first track", () => {
-    const two = station({
-      index: 1,
-      tracks: [track(), track({ id: "second", thumbnail: "https://i.ytimg.com/vi/second/hq.jpg" })],
-    });
-    assert.equal(currentArtwork(two), "https://i.ytimg.com/vi/second/hq.jpg");
-  });
-
-  it("returns null rather than reading past a cursor the frame outran", () => {
-    // Cursor and list arrive on the same frame but are not validated against
-    // each other, and the list is rewritten wholesale every poll.
-    assert.equal(currentArtwork(station({ index: 7 })), null);
-  });
-
-  it("treats an empty thumbnail as no thumbnail", () => {
-    // A metadata sidecar written from a stream with an empty tag sends `""`,
-    // which would render a broken-image icon.
-    assert.equal(currentArtwork(station({ tracks: [track({ thumbnail: "" })] })), null);
-    assert.equal(currentArtwork(station({ tracks: [track({ thumbnail: null })] })), null);
-  });
-
-  it("returns null when there is no station", () => {
-    assert.equal(currentArtwork(null), null);
-    assert.equal(currentArtwork(station({ tracks: [] })), null);
-  });
-});
+// `currentArtwork` lives in `now-playing.ts` and is tested beside it. What
+// belongs here is what the *bar* does with it, which the block above covers:
+// the artwork on a playing row, and none of it on an idle one.

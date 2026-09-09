@@ -8,13 +8,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { NowPlaying, PlaybackState, StationBody } from "@/lib/api/types";
+import type { NowPlaying, PlaybackState, StationBody, StationTrack } from "@/lib/api/types";
 import {
   NO_TRACK,
   UNTITLED_TRACK,
   canGoNext,
   canGoPrevious,
+  currentArtwork,
   describeNowPlaying,
+  trackArtwork,
 } from "@/lib/now-playing";
 
 /**
@@ -46,16 +48,18 @@ function station(overrides: Partial<StationBody> = {}): StationBody {
   return { index: 0, exhausted: false, tracks: [], ...overrides };
 }
 
-/** Enough of a track for the station helpers, which only count them. */
-const TRACK = {
-  id: "abc123",
-  title: "Rocket Man",
-  uploader: "Elton John",
-  thumbnail: null,
-  duration: 281,
-  cached: "done",
-  queue_pos: 1,
-} as const;
+function track(overrides: Partial<StationTrack> = {}): StationTrack {
+  return {
+    id: "abc123",
+    title: "Rocket Man",
+    uploader: "Elton John",
+    thumbnail: "https://i.ytimg.com/vi/abc123/hq.jpg",
+    duration: 281,
+    cached: "done",
+    queue_pos: 1,
+    ...overrides,
+  };
+}
 
 // ---------------------------------------------------------------------------
 
@@ -167,11 +171,11 @@ describe("canGoPrevious", () => {
   it("is closed at the start of the station", () => {
     // Sonos answers `prev` at position 1 by restarting the track, which reads
     // as the button having misfired.
-    assert.equal(canGoPrevious(station({ tracks: [TRACK] })), false);
+    assert.equal(canGoPrevious(station({ tracks: [track()] })), false);
   });
 
   it("opens once something has been played", () => {
-    assert.equal(canGoPrevious(station({ index: 1, tracks: [TRACK, TRACK] })), true);
+    assert.equal(canGoPrevious(station({ index: 1, tracks: [track(), track()] })), true);
   });
 
   it("is closed with no station", () => {
@@ -192,7 +196,7 @@ describe("canGoNext", () => {
     // The station loop extends itself ahead of the cursor. Requiring a visible
     // successor would grey Next out for precisely as long as the server takes
     // to resolve one — the moment it is most likely to be pressed.
-    assert.equal(canGoNext(station({ index: 0, tracks: [TRACK] })), true);
+    assert.equal(canGoNext(station({ index: 0, tracks: [track()] })), true);
   });
 
   it("is closed with no station", () => {
@@ -203,6 +207,66 @@ describe("canGoNext", () => {
   it("stays open on an exhausted station", () => {
     // Exhausted means no *unheard* track was found, not that the queue is
     // empty — the speaker can still walk what it already has.
-    assert.equal(canGoNext(station({ exhausted: true, tracks: [TRACK] })), true);
+    assert.equal(canGoNext(station({ exhausted: true, tracks: [track()] })), true);
+  });
+});
+
+describe("currentArtwork", () => {
+  it("prefers the station thumbnail over the speaker's album art", () => {
+    // `album_art` points at STREAM_HOST, an address picked for the speakers and
+    // never checked against the browser.
+    assert.equal(
+      currentArtwork(station({ tracks: [track()] })),
+      "https://i.ytimg.com/vi/abc123/hq.jpg",
+    );
+  });
+
+  it("follows the cursor rather than assuming the first track", () => {
+    const two = station({
+      index: 1,
+      tracks: [track(), track({ id: "second", thumbnail: "https://i.ytimg.com/vi/second/hq.jpg" })],
+    });
+    assert.equal(currentArtwork(two), "https://i.ytimg.com/vi/second/hq.jpg");
+  });
+
+  it("returns null rather than reading past a cursor the frame outran", () => {
+    // Cursor and list arrive on the same frame but are not validated against
+    // each other, and the list is rewritten wholesale every poll.
+    assert.equal(currentArtwork(station({ index: 7, tracks: [track()] })), null);
+  });
+
+  it("treats an empty thumbnail as no thumbnail", () => {
+    // A metadata sidecar written from a stream with an empty tag sends `""`,
+    // which would render a broken-image icon.
+    assert.equal(currentArtwork(station({ tracks: [track({ thumbnail: "" })] })), null);
+    assert.equal(currentArtwork(station({ tracks: [track({ thumbnail: null })] })), null);
+  });
+
+  it("returns null when there is no station", () => {
+    assert.equal(currentArtwork(null), null);
+    assert.equal(currentArtwork(station({ tracks: [] })), null);
+  });
+});
+
+describe("trackArtwork", () => {
+  it("shows the cursor's artwork while a track is engaged", () => {
+    const one = station({ tracks: [track()] });
+    assert.equal(trackArtwork(one, "playing"), "https://i.ytimg.com/vi/abc123/hq.jpg");
+    // Paused is still a loaded track, and blanking the art on pause would make
+    // the card flicker every time the button is pressed.
+    assert.equal(trackArtwork(one, "paused"), "https://i.ytimg.com/vi/abc123/hq.jpg");
+  });
+
+  it("drops the artwork when idle, however much the station still lists", () => {
+    // The whole reason this exists rather than callers reaching for
+    // `currentArtwork`: a stopped station keeps its track list, so the cursor's
+    // thumbnail beside "—" claims a song is on. `describePlayerBar` already
+    // makes this decision, and two copies of it are two things to get wrong.
+    assert.equal(trackArtwork(station({ tracks: [track()] }), "idle"), null);
+  });
+
+  it("returns null when there is no station to read", () => {
+    assert.equal(trackArtwork(null, "playing"), null);
+    assert.equal(trackArtwork(station({ tracks: [] }), "playing"), null);
   });
 });

@@ -133,3 +133,40 @@ export function canGoPrevious(station: StationBody | null | undefined): boolean 
 export function canGoNext(station: StationBody | null | undefined): boolean {
   return hasStation(station);
 }
+
+/**
+ * Artwork for the track under the cursor.
+ *
+ * Read off the station rather than `nowPlaying.album_art`, which is the URL
+ * *Sonos* was handed: it points at the backend on `STREAM_HOST`, an address
+ * chosen so the speakers can reach it and never checked against the browser.
+ * The station's `thumbnail` is YouTube's own CDN and is also present before
+ * the track has been cached, so it is the one that survives a cold start.
+ */
+export function currentArtwork(station: StationBody | null | undefined): string | null {
+  if (!hasStation(station)) return null;
+  // `index` is a cursor into a list the server rewrites on every frame, and the
+  // two arrive together but are not validated against each other.
+  return station.tracks[station.index]?.thumbnail || null;
+}
+
+/**
+ * The same artwork, but only when there is a track to attach it to.
+ *
+ * Stopping does not empty the station — the list and its cursor survive, so
+ * `currentArtwork` keeps answering with the last song's cover long after the
+ * room went quiet, and a cover above "—" claims something is on. The player
+ * bar has always dropped the thumbnail on its idle branch for exactly this
+ * reason; this is that rule with a name, so the card and the bar cannot decide
+ * it differently.
+ *
+ * Paused keeps the art. A paused track is still loaded and still what Play
+ * resumes, and blanking a 169px image on every press would be the loudest
+ * thing on the screen.
+ */
+export function trackArtwork(
+  station: StationBody | null | undefined,
+  mode: NowPlayingMode,
+): string | null {
+  return mode === "idle" ? null : currentArtwork(station);
+}

@@ -13,8 +13,8 @@
  * A `.ts` file, like the other view models, so Node can test it without a JSX
  * transform.
  */
-import { hasStation, type NowPlaying, type StationBody } from "@/lib/api/types";
-import { describeNowPlaying } from "@/lib/now-playing";
+import type { NowPlaying, StationBody } from "@/lib/api/types";
+import { describeNowPlaying, trackArtwork } from "@/lib/now-playing";
 
 /**
  * The two phone tabs.
@@ -196,24 +196,11 @@ export function describePlayerBar(
   return {
     title: view.title,
     subtitle: view.label,
-    thumbnail: currentArtwork(station),
+    // `trackArtwork` rather than `currentArtwork` even though the idle branch
+    // above already returned: the mode-to-artwork rule now has one home, and
+    // the bar reads it from there for the same reason the card does.
+    thumbnail: trackArtwork(station, view.mode),
     live: view.mode === "playing",
     idle: false,
   };
-}
-
-/**
- * Artwork for the track under the cursor.
- *
- * Read off the station rather than `nowPlaying.album_art`, which is the URL
- * *Sonos* was handed: it points at the backend on `STREAM_HOST`, an address
- * chosen so the speakers can reach it and never checked against the browser.
- * The station's `thumbnail` is YouTube's own CDN and is also present before
- * the track has been cached, so it is the one that survives a cold start.
- */
-export function currentArtwork(station: StationBody | null | undefined): string | null {
-  if (!hasStation(station)) return null;
-  // `index` is a cursor into a list the server rewrites on every frame, and the
-  // two arrive together but are not validated against each other.
-  return station.tracks[station.index]?.thumbnail || null;
 }
