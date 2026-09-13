@@ -8,7 +8,14 @@ import type { Device, StationBody } from "@/lib/api/types";
 import { useAction } from "@/lib/hooks/use-action";
 import { useErrorToast } from "@/lib/hooks/use-error-toast";
 import { useQueueActions } from "@/lib/hooks/use-queue-actions";
-import { canRefresh, describeQueue, describeRefresh, NO_TRACKS, type QueueRow } from "@/lib/queue";
+import {
+  canRefresh,
+  describeQueue,
+  describeRefresh,
+  NO_TRACKS,
+  splitQueue,
+  type QueueRow,
+} from "@/lib/queue";
 import { cn } from "@/lib/utils";
 
 export interface QueuePanelProps {
@@ -17,7 +24,10 @@ export interface QueuePanelProps {
 }
 
 /**
- * The station, as the server has it: what has played, what is on, what is next.
+ * The station, as the server has it: what is on, what is next, what has played.
+ *
+ * Drawn in that order rather than in station order — see `splitQueue` for why
+ * the history goes to the bottom and why only it is reversed.
  *
  * A mirror of server state with three writes — clicking a row jumps the speaker
  * there, an upcoming row's X drops it, and Refresh replaces the tail. Sonos
@@ -47,6 +57,10 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
   // moment a removal is in flight the two disagree, and mixing them is how a
   // row's index stops matching the track drawn on it.
   const rows = describeQueue(queue.station);
+  // Drawn in two blocks, not one: the station never trims what it has played,
+  // so in station order the history piles up above the cursor and pushes the
+  // playing track — and everything after it — out of sight.
+  const { upcoming, played } = splitQueue(rows);
 
   return (
     <div className="flex flex-1 flex-col">
@@ -76,6 +90,9 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
         <p className="py-4 text-center text-[0.85rem] text-muted-foreground">{NO_TRACKS}</p>
       ) : (
         /*
+         * The scroll region wraps *both* lists rather than living on either, so
+         * the cap below is a budget for the panel and not one each half gets.
+         *
          * Two different bounding strategies, because the page behaves
          * differently either side of the breakpoint.
          *
@@ -89,32 +106,80 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
          * as the only flexible child of a fixed-height column it absorbed every
          * pixel the panels above it needed.
          */
-        <ul className="thin-scrollbar flex max-h-[60vh] grow flex-col gap-[0.4rem] overflow-y-auto pr-[0.4rem] min-[901px]:max-h-none min-[901px]:overflow-y-visible min-[901px]:pr-0">
-          {/* Keyed by video id, not by position: a removal renumbers every row
-              after it, and an index key would hand the removed row's DOM node
-              — thumbnail included — to the track that moved up into its slot.
-              The id is also stable across the backfill that fills in a track's
-              metadata, which is what the index key was originally for. */}
-          {rows.map((row) => (
-            <li key={row.id}>
-              <QueueItem
-                row={row}
-                disabled={!device}
-                jumpDisabled={queue.jumpPending}
-                /*
-                 * Both handlers pass the id and nothing else. The index this
-                 * row was drawn with is a fact about this render; the hook
-                 * resolves the id against the list as it will be when the
-                 * request actually leaves.
-                 */
-                onJump={() => queue.jump(row.id)}
-                onRemove={() => queue.remove(row.id)}
-              />
-            </li>
-          ))}
-        </ul>
+        <div className="thin-scrollbar flex max-h-[60vh] grow flex-col gap-[0.4rem] overflow-y-auto pr-[0.4rem] min-[901px]:max-h-none min-[901px]:overflow-y-visible min-[901px]:pr-0">
+          {upcoming.length > 0 && (
+            <QueueList
+              rows={upcoming}
+              label="Playing and upcoming"
+              device={device}
+              queue={queue}
+            />
+          )}
+
+          {played.length > 0 && (
+            <>
+              {/*
+               * The boundary needs marking. With the cursor drawn at the top
+               * instead of at the join, nothing else distinguishes the last
+               * track still to come from the one that just finished — both are
+               * ordinary rows, and the listener would read straight past it
+               * into the history.
+               */}
+              <p className="mt-1 flex shrink-0 items-center gap-2 text-[0.7rem] font-medium tracking-wide text-muted-foreground uppercase">
+                Played
+                <span aria-hidden className="h-px grow bg-border" />
+              </p>
+              <QueueList rows={played} label="Already played" device={device} queue={queue} />
+            </>
+          )}
+        </div>
       )}
     </div>
+  );
+}
+
+/**
+ * One block of rows. Both halves of the panel are the same list drawn twice —
+ * the split decides only what is in each and in what order.
+ */
+function QueueList({
+  rows,
+  label,
+  device,
+  queue,
+}: {
+  rows: QueueRow[];
+  label: string;
+  device: Device | null;
+  queue: ReturnType<typeof useQueueActions>;
+}) {
+  return (
+    <ul aria-label={label} className="flex shrink-0 flex-col gap-[0.4rem]">
+      {/* Keyed by video id, not by position: a removal renumbers every row
+          after it, and an index key would hand the removed row's DOM node
+          — thumbnail included — to the track that moved up into its slot.
+          The id is also stable across the backfill that fills in a track's
+          metadata, which is what the index key was originally for. It is
+          stable across the two lists too, so the row the speaker advances
+          onto keeps its node when it moves from `played` to `upcoming`. */}
+      {rows.map((row) => (
+        <li key={row.id}>
+          <QueueItem
+            row={row}
+            disabled={!device}
+            jumpDisabled={queue.jumpPending}
+            /*
+             * Both handlers pass the id and nothing else. The index this
+             * row was drawn with is a fact about this render; the hook
+             * resolves the id against the list as it will be when the
+             * request actually leaves.
+             */
+            onJump={() => queue.jump(row.id)}
+            onRemove={() => queue.remove(row.id)}
+          />
+        </li>
+      ))}
+    </ul>
   );
 }
 

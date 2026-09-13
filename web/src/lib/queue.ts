@@ -149,6 +149,42 @@ function describeRow(track: StationTrack, index: number, cursor: number): QueueR
   };
 }
 
+/** The two halves of the panel, each in the order it should be drawn. */
+export interface QueueSections {
+  /** The playing track, then what follows it, in the order it will play. */
+  upcoming: QueueRow[];
+  /** What has already played, most recent first. */
+  played: QueueRow[];
+}
+
+/**
+ * The station list cut at the cursor and re-ordered for reading.
+ *
+ * The station never trims what it has played, so in play order the history
+ * accumulates above the cursor and pushes the playing track — and everything
+ * the listener actually wants to see — steadily further down. Drawn this way
+ * the top of the panel is always "what's on, what's next", however long the
+ * session has run.
+ *
+ * Only `upcoming` keeps play order. Reversing it too would put the immediate
+ * next track at the bottom of its block and make the queue read upwards, which
+ * is the arrangement this is here to avoid; `played` is reversed because its
+ * useful end is the track that just finished, sitting against the divider.
+ *
+ * Order is the only thing decided here. The rows are the ones `describeQueue`
+ * produced, indices and all — those are positions in the *station* list, and a
+ * jump or a removal is addressed by id and resolved against that list at
+ * dispatch (see `indexOfTrack`), so moving a row on screen cannot desync it.
+ */
+export function splitQueue(rows: QueueRow[]): QueueSections {
+  const cursor = rows.findIndex((row) => row.active);
+  // No active row — the cursor has run past the list, which `describeQueue`
+  // already renders as "nothing is playing". Calling one of these upcoming
+  // would draw a playing track the speaker is not on.
+  if (cursor < 0) return { upcoming: [], played: [...rows].reverse() };
+  return { upcoming: rows.slice(cursor), played: rows.slice(0, cursor).reverse() };
+}
+
 /**
  * The station as the panel should draw it: the last frame minus the tracks
  * already dropped.
