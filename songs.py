@@ -187,3 +187,217 @@ def attribute(entry):
 
     return Song(video_id=vid, artist=artist, tokens=tokens,
                 duration=duration, rank=rank, title=title)
+
+
+# --- Memory ------------------------------------------------------------------
+
+Hit = namedtuple('Hit', 'entry reason')
+"""Why a candidate was judged a duplicate.
+
+`reason == 'id'` means we had already seen that exact video; the other three
+('exact', 'subset', 'overlap') are fuzzy judgements, and they are the ones
+worth logging. Without that distinction "why did it skip that song" is
+unanswerable and MATCH_OVERLAP can never be tuned from real behaviour.
+"""
+
+
+@dataclass
+class Entry:
+    artist: str
+    tokens: frozenset
+    duration: float
+    ids: dict = field(default_factory=dict)   # video_id -> rank, insertion-ordered
+    title: str = ''
+    last_at: float = 0.0
+    heard: bool = False
+
+    def best_id(self):
+        """The preferred upload of this song: lowest rank, ties by first-seen.
+
+        Dicts keep insertion order, so `min` over the ids returns the earliest
+        of an equal-ranked set — which is mix relevance, the tiebreak the
+        collapse in build_station_queue wants.
+        """
+        return min(self.ids, key=lambda v: self.ids[v])
+
+    def as_song(self):
+        """This entry as a candidate, so it can be tested against another memory."""
+        best = self.best_id()
+        return Song(video_id=best, artist=self.artist, tokens=self.tokens,
+                    duration=self.duration, rank=self.ids[best], title=self.title)
+
+
+def _match(a_tokens, a_duration, b_tokens, b_duration):
+    """Fuzzy comparison of two same-artist songs. Returns a reason or None.
+
+    Rules 3 and 4 of the match order. The ≥2-token floor on containment is what
+    stops `{intro}` swallowing `{intro, to, the, record}`: a one-word subset
+    falls through and has to earn the match on duration instead.
+
+    Subset matching is directional: the query (a) must be a subset of the stored
+    entry (b). The reverse (stored ⊂ query) means the query has extra tokens that
+    might make it a different song, so those cases fall through to the overlap
+    check which requires duration corroboration.
+    """
+    if a_tokens == b_tokens:
+        return 'exact'
+    # Subset: query tokens are contained in stored tokens (only this direction!)
+    if a_tokens <= b_tokens and len(a_tokens) >= MATCH_MIN_SUBSET_TOKENS:
+        return 'subset'
+    # Overlap check uses the smaller set for percentage calculation
+    small, large = ((a_tokens, b_tokens) if len(a_tokens) <= len(b_tokens)
+                    else (b_tokens, a_tokens))
+    if not small:
+        return None
+    if len(small & large) / len(small) < MATCH_OVERLAP:
+        return None
+    # Corroboration we do not have is not corroboration.
+    if a_duration is None or b_duration is None:
+        return None
+    if abs(a_duration - b_duration) <= MATCH_DURATION_TOLERANCE:
+        return 'overlap'
+    return None
+
+
+class SongMemory:
+    """An artist-bucketed index of songs, used as 'have we had this one'.
+
+    One class covers both anti-repeat mechanisms this replaces, which differed
+    only in lifetime and persistence: the station-scoped instance takes no TTL
+    and no cap (it dies with its station), the process-scoped one takes seven
+    days and a cap and is written to disk. `build_station_queue` uses a third,
+    throwaway instance as its within-pool accumulator, so there is exactly one
+    matcher in the app rather than two that can drift.
+
+    Takes no lock of its own, deliberately. CLAUDE.md fixes the order
+    `Station.lock -> _STATE_LOCK -> _Scheduler._cv`, and a fourth lock here is
+    an easy way to violate it by accident. Callers hold the right one.
+    """
+
+    def __init__(self, ttl=None, queued_ttl=None, max_songs=None):
+        self.ttl = ttl                  # None = never expire
+        self.queued_ttl = queued_ttl    # None = unheard entries never expire
+        self.max_songs = max_songs      # None = uncapped
+        self.dirty = False
+        self._entries = []              # insertion order; mix relevance
+        self._buckets = {}              # artist -> [Entry]
+        self._by_id = {}                # video_id -> Entry
+
+    # -- reads ----------------------------------------------------------------
+
+    def _expired(self, entry, now):
+        ttl = self.ttl if entry.heard else self.queued_ttl
+        return ttl is not None and now - entry.last_at > ttl
+
+    def find(self, song, now=None):
+        """Cheapest-first match of `song` against this memory, or None.
+
+        Expired entries are skipped rather than pruned: `find` runs once per
+        candidate per rung, and pruning here would make a full rebuild O(n·m).
+        `prune` is called from `add` and from the station loop.
+        """
+        now = time.time() if now is None else now
+        entry = self._by_id.get(song.video_id)
+        if entry is not None and not self._expired(entry, now):
+            return Hit(entry, 'id')
+        for other in self._buckets.get(song.artist, ()):
+            if self._expired(other, now):
+                continue
+            reason = _match(song.tokens, song.duration, other.tokens, other.duration)
+            if reason:
+                return Hit(other, reason)
+        return None
+
+    def entries(self, now=None):
+        """Live entries in insertion order."""
+        now = time.time() if now is None else now
+        return [e for e in self._entries if not self._expired(e, now)]
+
+    def oldest_heard(self, now=None):
+        """The least-recently-heard song, for the ladder's final rung.
+
+        Only heard entries are eligible: re-serving a queued-but-unheard song
+        would replay something the listener never got to, which is neither a
+        repeat nor a new track.
+        """
+        now = time.time() if now is None else now
+        live = [e for e in self._entries if e.heard and not self._expired(e, now)]
+        return min(live, key=lambda e: e.last_at) if live else None
+
+    def __len__(self):
+        return len(self._entries)
+
+    # -- writes ---------------------------------------------------------------
+
+    def add(self, song, heard=False, now=None):
+        """Record a song. Merges into an existing entry when it matches one."""
+        now = time.time() if now is None else now
+        hit = self.find(song, now=now)
+        if hit is not None:
+            entry = hit.entry
+            entry.ids.setdefault(song.video_id, song.rank)
+            self._by_id[song.video_id] = entry
+            entry.last_at = now
+            entry.heard = entry.heard or heard
+            self.dirty = True
+            return entry
+        entry = Entry(artist=song.artist, tokens=song.tokens,
+                      duration=song.duration, ids={song.video_id: song.rank},
+                      title=song.title, last_at=now, heard=heard)
+        self._insert(entry)
+        self.prune(now)
+        return entry
+
+    def _insert(self, entry):
+        """Place a fully-built Entry into all three structures.
+
+        Three of them, because each answers a different question at a different
+        cost: `_entries` is the list prune and oldest_heard walk, `_buckets`
+        is what makes `find` compare against one artist's songs instead of all
+        2000, and `_by_id` is the O(1) exact hit that runs before any fuzzy
+        work. They are only consistent if nothing writes one without the
+        others, which is why both `add` and `restore` go through here.
+        """
+        self._entries.append(entry)
+        self._buckets.setdefault(entry.artist, []).append(entry)
+        for vid in entry.ids:
+            self._by_id[vid] = entry
+        self.dirty = True
+
+    def mark_heard(self, video_id, now=None):
+        """Promote a queued entry to heard. True if anything changed."""
+        now = time.time() if now is None else now
+        entry = self._by_id.get(video_id)
+        if entry is None:
+            return False
+        entry.heard = True
+        entry.last_at = now
+        self.dirty = True
+        return True
+
+    def prune(self, now=None):
+        """Drop expired entries, then evict by `last_at` ascending to the cap.
+
+        Expiry before eviction, so the cap only ever has to deal with entries
+        that are still meant to be here. The cap is a memory backstop rather
+        than the intended limit — a week of continuous listening is roughly
+        2500 tracks against a default of 2000 — so the listener who reaches it
+        loses their oldest few hundred songs early, which is the correct thing
+        to give up.
+        """
+        now = time.time() if now is None else now
+        live = [e for e in self._entries if not self._expired(e, now)]
+        if self.max_songs is not None and len(live) > self.max_songs:
+            live.sort(key=lambda e: e.last_at)
+            live = live[len(live) - self.max_songs:]
+        if len(live) == len(self._entries):
+            return
+        keep = {id(e) for e in live}
+        self._entries = [e for e in self._entries if id(e) in keep]
+        self._buckets = {}
+        self._by_id = {}
+        for entry in self._entries:
+            self._buckets.setdefault(entry.artist, []).append(entry)
+            for vid in entry.ids:
+                self._by_id[vid] = entry
+        self.dirty = True

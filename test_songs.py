@@ -154,5 +154,179 @@ class TestDuration(unittest.TestCase):
         self.assertIsNone(songs.attribute({'id': 'x', 'title': 'A - B'}).duration)
 
 
+def song(artist, words, duration=200, vid=None, rank=2, title=''):
+    """A Song built directly, for match tests that are about tokens only."""
+    tokens = frozenset(words.split())
+    return songs.Song(video_id=vid or f'{artist}:{words}', artist=artist,
+                      tokens=tokens, duration=duration, rank=rank,
+                      title=title or f'{artist} - {words}')
+
+
+class TestMatchRules(unittest.TestCase):
+    def setUp(self):
+        self.mem = songs.SongMemory()
+
+    def test_rule_1_a_known_video_id_is_a_duplicate(self):
+        self.mem.add(song('a', 'one two', vid='v1'))
+        hit = self.mem.find(song('a', 'totally different', vid='v1'))
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.reason, 'id')
+
+    def test_rule_2_an_empty_artist_bucket_is_not_a_duplicate(self):
+        # The O(1) step that keeps fuzzy matching at hash speed, and the one
+        # that implements "a cover by another artist stays eligible".
+        self.mem.add(song('ellie goulding', 'love me like you do'))
+        self.assertIsNone(self.mem.find(song('boyce avenue', 'love me like you do')))
+
+    def test_rule_3_equal_token_sets_match(self):
+        self.mem.add(song('dua lipa', 'levitating', duration=217, vid='v1'))
+        hit = self.mem.find(song('dua lipa', 'levitating', duration=203, vid='v2'))
+        self.assertEqual(hit.reason, 'exact')
+
+    def test_rule_3_containment_ignores_duration(self):
+        # "See You Again" against "See You Again Furious 7 Soundtrack" across
+        # uploads whose durations legitimately differ. Requiring duration here
+        # would leave both queueable.
+        self.mem.add(song('wiz khalifa', 'see you again furious 7 soundtrack', duration=238))
+        hit = self.mem.find(song('wiz khalifa', 'see you again', duration=180))
+        self.assertEqual(hit.reason, 'subset')
+
+    def test_rule_3_needs_two_tokens_to_skip_the_duration_check(self):
+        # `{intro}` must not swallow `{intro, to, the, record}` on containment
+        # alone. It falls through to rule 4 and has to earn it on duration.
+        self.mem.add(song('a', 'intro to the record', duration=200))
+        self.assertIsNone(self.mem.find(song('a', 'intro', duration=400)))
+
+    def test_rule_4_a_single_token_subset_can_still_match_on_duration(self):
+        self.mem.add(song('a', 'intro to the record', duration=200))
+        hit = self.mem.find(song('a', 'intro', duration=202))
+        self.assertEqual(hit.reason, 'overlap')
+
+    def test_rule_4_partial_overlap_below_threshold_stays_distinct(self):
+        # 2/3 = 0.67. Two parts of one work are two songs.
+        self.mem.add(song('a', 'song part 1', duration=200))
+        self.assertIsNone(self.mem.find(song('a', 'song part 2', duration=200)))
+
+    def test_rule_4_partial_overlap_needs_the_durations_to_agree(self):
+        self.mem.add(song('a', 'one two three four', duration=200))
+        self.assertIsNone(self.mem.find(song('a', 'one two three four five', duration=400)))
+
+    def test_containment_merges_a_taylors_version(self):
+        self.mem.add(song('taylor swift', 'love story taylors', duration=235))
+        hit = self.mem.find(song('taylor swift', 'love story', duration=356))
+        self.assertEqual(hit.reason, 'subset')
+
+    def test_an_unknown_duration_never_confirms_a_partial_match(self):
+        # Corroboration we do not have is not corroboration. Flat entries
+        # always carry a duration, so this is the resolved-metadata edge.
+        self.mem.add(song('a', 'one two three four', duration=None))
+        self.assertIsNone(self.mem.find(song('a', 'one two three four five', duration=200)))
+
+
+class TestMemoryBookkeeping(unittest.TestCase):
+    def test_a_matched_add_merges_ids_into_one_entry(self):
+        mem = songs.SongMemory()
+        mem.add(songs.attribute(SYN['syn_video']))
+        mem.add(songs.attribute(SYN['syn_topic']))
+        self.assertEqual(len(mem), 1)
+        self.assertEqual(set(mem.entries()[0].ids), {'syn_video', 'syn_topic'})
+
+    def test_best_id_is_the_lowest_rank_seen(self):
+        mem = songs.SongMemory()
+        mem.add(songs.attribute(SYN['syn_video']))    # rank 3
+        mem.add(songs.attribute(SYN['syn_topic']))    # rank 0
+        self.assertEqual(mem.entries()[0].best_id(), 'syn_topic')
+
+    def test_best_id_breaks_ties_by_first_seen(self):
+        mem = songs.SongMemory()
+        mem.add(song('a', 'one two', vid='first', rank=2))
+        mem.add(song('a', 'one two', vid='second', rank=2))
+        self.assertEqual(mem.entries()[0].best_id(), 'first')
+
+    def test_an_id_learned_through_a_merge_is_found_by_rule_1(self):
+        mem = songs.SongMemory()
+        mem.add(songs.attribute(SYN['syn_video']))
+        mem.add(songs.attribute(SYN['syn_topic']))
+        hit = mem.find(song('somebody else', 'unrelated', vid='syn_topic'))
+        self.assertEqual(hit.reason, 'id')
+
+    def test_entries_keep_insertion_order(self):
+        mem = songs.SongMemory()
+        for w in ('first song', 'second song', 'third song'):
+            mem.add(song('a', w))
+        self.assertEqual([e.tokens for e in mem.entries()],
+                         [frozenset(w.split()) for w in
+                          ('first song', 'second song', 'third song')])
+
+    def test_as_song_round_trips_into_find(self):
+        # build_station_queue tests a pooled Entry against the history, so an
+        # Entry has to be able to become a Song again without drift.
+        mem = songs.SongMemory()
+        mem.add(songs.attribute(SYN['syn_video']))
+        other = songs.SongMemory()
+        other.add(songs.attribute(SYN['syn_topic']))
+        self.assertIsNotNone(other.find(mem.entries()[0].as_song()))
+
+
+class TestHeardAndExpiry(unittest.TestCase):
+    def test_a_queued_track_expires_on_the_short_ttl(self):
+        mem = songs.SongMemory(ttl=1000, queued_ttl=100)
+        mem.add(song('a', 'one two'), heard=False, now=0)
+        self.assertIsNotNone(mem.find(song('a', 'one two'), now=50))
+        self.assertIsNone(mem.find(song('a', 'one two'), now=500))
+
+    def test_a_heard_track_survives_the_short_ttl(self):
+        mem = songs.SongMemory(ttl=1000, queued_ttl=100)
+        mem.add(song('a', 'one two'), heard=True, now=0)
+        self.assertIsNotNone(mem.find(song('a', 'one two'), now=500))
+        self.assertIsNone(mem.find(song('a', 'one two'), now=2000))
+
+    def test_marking_heard_promotes_the_entry_and_restamps_it(self):
+        mem = songs.SongMemory(ttl=1000, queued_ttl=100)
+        mem.add(song('a', 'one two', vid='v1'), heard=False, now=0)
+        self.assertTrue(mem.mark_heard('v1', now=50))
+        self.assertIsNotNone(mem.find(song('a', 'one two'), now=900))
+
+    def test_marking_an_unknown_id_heard_is_a_no_op(self):
+        self.assertFalse(songs.SongMemory().mark_heard('nope'))
+
+    def test_none_ttl_never_expires(self):
+        # The station-scoped instance: it dies with its station instead.
+        mem = songs.SongMemory()
+        mem.add(song('a', 'one two'), now=0)
+        self.assertIsNotNone(mem.find(song('a', 'one two'), now=10 ** 9))
+
+    def test_the_cap_evicts_oldest_first(self):
+        # "The newest exclusions are never evicted first" — the requirement
+        # stated as the property that would be violated.
+        mem = songs.SongMemory(ttl=1000, max_songs=2)
+        mem.add(song('a', 'oldest'), heard=True, now=0)
+        mem.add(song('a', 'middle'), heard=True, now=10)
+        mem.add(song('a', 'newest'), heard=True, now=20)
+        self.assertEqual(len(mem), 2)
+        self.assertIsNone(mem.find(song('a', 'oldest'), now=20))
+        self.assertIsNotNone(mem.find(song('a', 'newest'), now=20))
+
+    def test_expiry_runs_before_the_cap(self):
+        mem = songs.SongMemory(ttl=100, max_songs=2)
+        mem.add(song('a', 'expired'), heard=True, now=0)
+        mem.add(song('a', 'fresh one'), heard=True, now=1000)
+        mem.add(song('a', 'fresh two'), heard=True, now=1001)
+        mem.prune(now=1002)
+        self.assertEqual(len(mem), 2)
+        self.assertIsNotNone(mem.find(song('a', 'fresh one'), now=1002))
+
+    def test_oldest_heard_ignores_unheard_entries(self):
+        # Rung 6 re-serves this. Handing back a queued-but-never-played track
+        # would replay something the listener never got to.
+        mem = songs.SongMemory()
+        mem.add(song('a', 'never played'), heard=False, now=0)
+        mem.add(song('a', 'actually heard'), heard=True, now=100)
+        self.assertEqual(mem.oldest_heard().tokens, frozenset({'actually', 'heard'}))
+
+    def test_oldest_heard_is_none_when_nothing_was_heard(self):
+        self.assertIsNone(songs.SongMemory().oldest_heard())
+
+
 if __name__ == '__main__':
     unittest.main()
