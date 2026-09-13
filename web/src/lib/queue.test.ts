@@ -25,7 +25,9 @@ import {
   indexOfTrack,
   pendingStation,
   rowStatus,
+  splitQueue,
   trackStatus,
+  type QueueRow,
 } from "@/lib/queue";
 
 function track(overrides: Partial<StationTrack> = {}): StationTrack {
@@ -264,6 +266,77 @@ describe("describeQueue", () => {
     );
     assert.equal(rows[0].id, "aaa");
     assert.equal(rows[1].id, "bbb");
+  });
+});
+
+describe("splitQueue", () => {
+  function ids(rows: QueueRow[]): string[] {
+    return rows.map((row) => row.id);
+  }
+
+  it("puts the playing track at the head of what is upcoming", () => {
+    // The whole point of the split: the listener looks at the top of the panel
+    // and sees what is on and what is next, however long the session has run.
+    const rows = describeQueue(
+      station({
+        index: 2,
+        tracks: [track({ id: "a" }), track({ id: "b" }), track({ id: "c" }), track({ id: "d" })],
+      }),
+    );
+    const { upcoming } = splitQueue(rows);
+    assert.deepEqual(ids(upcoming), ["c", "d"]);
+    assert.equal(upcoming[0].active, true);
+  });
+
+  it("keeps upcoming tracks in the order they will play", () => {
+    // Not reversed. Reversing this half is what makes "what's next" read
+    // bottom-to-top, which is the arrangement this change exists to avoid.
+    const rows = describeQueue(
+      station({
+        index: 0,
+        tracks: [track({ id: "a" }), track({ id: "b" }), track({ id: "c" })],
+      }),
+    );
+    assert.deepEqual(ids(splitQueue(rows).upcoming), ["a", "b", "c"]);
+  });
+
+  it("hands back played tracks most-recent first", () => {
+    const rows = describeQueue(
+      station({
+        index: 3,
+        tracks: [track({ id: "a" }), track({ id: "b" }), track({ id: "c" }), track({ id: "d" })],
+      }),
+    );
+    assert.deepEqual(ids(splitQueue(rows).played), ["c", "b", "a"]);
+  });
+
+  it("leaves the rows themselves untouched", () => {
+    // Order is the only thing this decides. The index each row carries is a
+    // position in the station list and must survive being moved on screen —
+    // it is still what a jump would be addressed by.
+    const rows = describeQueue(
+      station({ index: 1, tracks: [track({ id: "a" }), track({ id: "b" })] }),
+    );
+    const { upcoming, played } = splitQueue(rows);
+    assert.equal(played[0].index, 0);
+    assert.equal(upcoming[0].index, 1);
+  });
+
+  it("treats the whole list as played when the cursor has run past it", () => {
+    // Same frame `describeQueue` marks no row active on: a refresh can shrink
+    // `tracks` under a cursor that has not moved yet. Nothing is upcoming, and
+    // guessing one of these rows is would put a jump target on screen that the
+    // speaker is not on.
+    const rows = describeQueue(
+      station({ index: 5, tracks: [track({ id: "a" }), track({ id: "b" })] }),
+    );
+    const { upcoming, played } = splitQueue(rows);
+    assert.deepEqual(ids(upcoming), []);
+    assert.deepEqual(ids(played), ["b", "a"]);
+  });
+
+  it("answers with two empty halves for an empty list", () => {
+    assert.deepEqual(splitQueue([]), { upcoming: [], played: [] });
   });
 });
 
