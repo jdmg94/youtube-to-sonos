@@ -18,7 +18,13 @@ import {
  * advances its own queue and the station loop runs server-side without asking
  * anyone, so the client is a subscriber here, never an owner: every action
  * (play, skip, jump) is a write whose result arrives back through this stream.
- * Nothing should optimistically patch what comes out of it.
+ * Nothing patches what comes out of it, and nothing should.
+ *
+ * The queue panel's optimistic removal is not an exception to that. It hides
+ * rows *downstream* of this hook (`pendingStation`, driven by
+ * `useQueueActions`) and reaps each id the moment a frame stops listing it, so
+ * the frames themselves stay untouched and the divergence cannot outlive one
+ * round trip. Patching state in here would have no such expiry.
  */
 
 export type StreamStatus =

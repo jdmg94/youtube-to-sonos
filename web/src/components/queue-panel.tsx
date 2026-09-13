@@ -1,23 +1,14 @@
 "use client";
 
 import { ArrowDown, ListMusic, Loader2, Music, Play, RefreshCw, TriangleAlert, X } from "lucide-react";
-import { useState } from "react";
 import { toast } from "sonner";
 
 import { api } from "@/lib/api/client";
 import type { Device, StationBody } from "@/lib/api/types";
 import { useAction } from "@/lib/hooks/use-action";
 import { useErrorToast } from "@/lib/hooks/use-error-toast";
-import {
-  canRefresh,
-  describeJump,
-  describeQueue,
-  describeRefresh,
-  describeRemove,
-  describeRemoved,
-  NO_TRACKS,
-  type QueueRow,
-} from "@/lib/queue";
+import { useQueueActions } from "@/lib/hooks/use-queue-actions";
+import { canRefresh, describeQueue, describeRefresh, NO_TRACKS, type QueueRow } from "@/lib/queue";
 import { cn } from "@/lib/utils";
 
 export interface QueuePanelProps {
@@ -28,46 +19,34 @@ export interface QueuePanelProps {
 /**
  * The station, as the server has it: what has played, what is on, what is next.
  *
- * A mirror of server state with two writes — clicking a row tells the speaker
- * to jump there, and an upcoming row's X drops it. Sonos owns this queue and
- * advances it on its own, so nothing here is patched locally: the list is
- * re-derived from every event frame, and both writes are acknowledged by the
- * next frame rather than by a local edit.
+ * A mirror of server state with three writes — clicking a row jumps the speaker
+ * there, an upcoming row's X drops it, and Refresh replaces the tail. Sonos
+ * owns this queue and advances it on its own, so the list is re-derived from
+ * every event frame rather than edited here.
+ *
+ * The one exception is a removal, which the panel applies before the server
+ * has answered: the listener is already sure of the outcome, and making them
+ * watch a spinner and a poll for it meant dropping three songs was three
+ * sequential waits. `useQueueActions` owns that divergence — see its notes for
+ * why the indices this panel renders are not the ones it sends.
  */
 export function QueuePanel({ device, station }: QueuePanelProps) {
   const deviceIp = device?.ip;
 
-  const jump = useAction((index: number) =>
-    api.transport({ device_ip: deviceIp, action: "jump", index }),
-  );
+  const queue = useQueueActions(station, deviceIp);
   const refresh = useAction(async () => {
     const result = await api.refreshStation(deviceIp);
     toast.success(describeRefresh(result.dropped));
     return result;
   });
-  const remove = useAction(async (index: number, id: string) => {
-    const result = await api.removeTrack({ device_ip: deviceIp, index, id });
-    // The server's title, not the row's: the row's is a render old, and the
-    // whole point of naming the track is to confirm which one actually went.
-    toast.success(describeRemoved(result.title));
-    return result;
-  });
 
-  /*
-   * Which row's X shows the spinner. `remove.pending` is one flag for the whole
-   * action, so on its own it would spin every button on the list — and this
-   * panel's entire failure mode is the listener not being sure which track a
-   * click landed on. Held by video id rather than by index because the station
-   * renumbers underneath it. Never cleared: it is only ever read alongside
-   * `remove.pending`, and clearing it would need an effect for nothing.
-   */
-  const [removing, setRemoving] = useState<string | null>(null);
-
-  useErrorToast(jump.error);
+  useErrorToast(queue.error);
   useErrorToast(refresh.error);
-  useErrorToast(remove.error);
 
-  const rows = describeQueue(station);
+  // Everything below reads the hook's station, never the raw frame: for the
+  // moment a removal is in flight the two disagree, and mixing them is how a
+  // row's index stops matching the track drawn on it.
+  const rows = describeQueue(queue.station);
 
   return (
     <div className="flex flex-1 flex-col">
@@ -80,7 +59,7 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
         <button
           type="button"
           onClick={() => refresh.run()}
-          disabled={!canRefresh(station, !!device, refresh.pending)}
+          disabled={!canRefresh(queue.station, !!device, refresh.pending)}
           title="Discard what's queued ahead and fetch a fresh set of songs"
           className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-white/[0.05] px-[0.7rem] py-[0.3rem] text-[0.75rem] font-medium text-muted-foreground transition-all duration-200 hover:border-gold/35 hover:bg-gold/[0.12] hover:text-gold disabled:pointer-events-none disabled:opacity-45"
         >
@@ -111,42 +90,25 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
          * pixel the panels above it needed.
          */
         <ul className="thin-scrollbar flex max-h-[60vh] grow flex-col gap-[0.4rem] overflow-y-auto pr-[0.4rem] min-[901px]:max-h-none min-[901px]:overflow-y-visible min-[901px]:pr-0">
-          {/* Keyed by station index, not by title: the backfill that fills in a
-              track's metadata would otherwise remount the row and drop the
-              thumbnail it had already loaded. */}
+          {/* Keyed by video id, not by position: a removal renumbers every row
+              after it, and an index key would hand the removed row's DOM node
+              — thumbnail included — to the track that moved up into its slot.
+              The id is also stable across the backfill that fills in a track's
+              metadata, which is what the index key was originally for. */}
           {rows.map((row) => (
-            <li key={row.index}>
+            <li key={row.id}>
               <QueueItem
                 row={row}
                 disabled={!device}
-                jumpDisabled={jump.pending}
+                jumpDisabled={queue.jumpPending}
                 /*
-                 * One removal at a time, and not only to stop a double-click.
-                 * Two X's clicked from the same render carry indices computed
-                 * against the same list, and the first removal renumbers the
-                 * second — the server's id check turns that into a 409 rather
-                 * than the wrong song, but a refusal the user has to
-                 * understand is worse than a button that waits.
+                 * Both handlers pass the id and nothing else. The index this
+                 * row was drawn with is a fact about this render; the hook
+                 * resolves the id against the list as it will be when the
+                 * request actually leaves.
                  */
-                removeDisabled={remove.pending}
-                removing={remove.pending && removing === row.id}
-                onJump={() => {
-                  const decision = describeJump(station, row.index);
-                  if (!decision.ok) {
-                    toast.error(decision.message);
-                    return;
-                  }
-                  void jump.run(decision.index);
-                }}
-                onRemove={() => {
-                  const decision = describeRemove(station, row.index);
-                  if (!decision.ok) {
-                    toast.error(decision.message);
-                    return;
-                  }
-                  setRemoving(decision.id);
-                  void remove.run(decision.index, decision.id);
-                }}
+                onJump={() => queue.jump(row.id)}
+                onRemove={() => queue.remove(row.id)}
               />
             </li>
           ))}
@@ -169,8 +131,6 @@ function QueueItem({
   row,
   disabled,
   jumpDisabled,
-  removeDisabled,
-  removing,
   onJump,
   onRemove,
 }: {
@@ -178,9 +138,6 @@ function QueueItem({
   /** No speaker to send anything to. Applies to both buttons. */
   disabled: boolean;
   jumpDisabled: boolean;
-  removeDisabled: boolean;
-  /** This row is the one being removed — spin its X, not every row's. */
-  removing: boolean;
   onJump: () => void;
   onRemove: () => void;
 }) {
@@ -270,21 +227,23 @@ function QueueItem({
        * never be removed, and a permanently dead button is a worse answer than
        * no button. Always visible on the rows that can — a hover-only control
        * does not exist on a phone, which is where most of this app is used.
+       *
+       * No spinner and no pending state: the row itself is the feedback, and it
+       * is gone the moment this is clicked. If the server refuses, the row
+       * comes back with a toast saying why. `disabled` is only "there is no
+       * speaker" — a removal in flight elsewhere on the list does not stop
+       * this one, which is the point of the whole arrangement.
        */}
       {row.removable && (
         <button
           type="button"
           onClick={onRemove}
-          disabled={disabled || removeDisabled}
+          disabled={disabled}
           aria-label={`Remove ${row.title} from the queue`}
           title="Remove from the queue"
           className="mr-2 flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors duration-200 hover:bg-destructive/15 hover:text-destructive disabled:pointer-events-none disabled:opacity-40"
         >
-          {removing ? (
-            <Loader2 aria-hidden className="size-3.5 animate-spin" />
-          ) : (
-            <X aria-hidden className="size-3.5" />
-          )}
+          <X aria-hidden className="size-3.5" />
         </button>
       )}
     </div>
