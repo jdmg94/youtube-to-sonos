@@ -14,6 +14,7 @@ import logging
 import heapq
 import random
 import itertools
+import atexit
 from collections import Counter, OrderedDict
 from flask import Flask, jsonify, request, Response
 from werkzeug.exceptions import HTTPException
@@ -1809,6 +1810,66 @@ def _evict(station):
                     f"-{WINDOW_BEHIND}/+{WINDOW_AHEAD} window)")
 
 
+def _mark_heard(station):
+    """Record the track under the cursor as actually played.
+
+    Idempotent — called every tick while the speaker is PLAYING, and
+    SongMemory.mark_heard is a no-op on a song already marked. That is cheaper
+    than tracking which index we last marked, and correct across a jump
+    backwards, where the listener really is hearing the track again.
+
+    A track the listener skips through between two polls is never marked, and
+    that is the right answer: it was not heard, so it should not be excluded
+    for seven days, and it should not be a candidate for the oldest-heard
+    floor.
+    """
+    # station.memory and station.tracks are both guarded by Station.lock, and
+    # this is called from the loop *outside* the `with station.lock` block that
+    # wraps _top_up — so it takes the lock itself. Order is
+    # Station.lock -> _STATE_LOCK, per the Global Constraint; inverting it here
+    # deadlocks against _top_up, which holds them in that order.
+    with station.lock:
+        if not station.tracks or not 0 <= station.index < len(station.tracks):
+            return
+        vid = station.tracks[station.index]['video_id']
+        with _STATE_LOCK:
+            station.memory.mark_heard(vid)
+            _HISTORY.mark_heard(vid)
+
+
+def _flush_history(force=False):
+    """Write the history to disk, at most once per HISTORY_FLUSH_INTERVAL.
+
+    The snapshot is taken under the lock and the write happens outside it. A
+    2000-entry json.dump is milliseconds, but _STATE_LOCK is also held by every
+    /media range request and every scheduler dispatch, and this runs on a timer
+    forever — so it is exactly the kind of small cost that becomes an audible
+    stall at the wrong moment.
+
+    During playback, `dirty` is set every tick (mark_heard advances last_at on
+    the playing song), so HISTORY_FLUSH_INTERVAL is the real rate limit. `dirty`
+    only skips writes while nothing is playing.
+    """
+    global _HISTORY_FLUSHED_AT
+    now = time.time()
+    with _STATE_LOCK:
+        if not _HISTORY.dirty:
+            return
+        if not force and now - _HISTORY_FLUSHED_AT < HISTORY_FLUSH_INTERVAL:
+            return
+        _HISTORY_FLUSHED_AT = now
+        payload = _HISTORY.snapshot()
+    songs.save_history(_HISTORY_PATH, payload)
+
+
+def _load_history():
+    payload = songs.load_history(_HISTORY_PATH)
+    with _STATE_LOCK:
+        _HISTORY.restore(payload)
+        count = len(_HISTORY)
+    logger.info(f"Loaded {count} remembered songs from {_HISTORY_PATH}")
+
+
 def _station_loop(device_ip, generation):
     """Follow the speaker's queue position; prefetch ahead and evict behind.
 
@@ -1835,9 +1896,11 @@ def _station_loop(device_ip, generation):
                 station.index = min(position - 1, len(station.tracks) - 1)
                 _reprioritize(station)
 
-            if state == 'PLAYING' and not station.playing_seen:
-                station.playing_seen = True
-                logger.info(f"Playback started on {device_ip}; prefetching ahead")
+            if state == 'PLAYING':
+                if not station.playing_seen:
+                    station.playing_seen = True
+                    logger.info(f"Playback started on {device_ip}; prefetching ahead")
+                _mark_heard(station)
 
             if state == 'STOPPED':
                 station.idle_polls += 1
@@ -1855,6 +1918,7 @@ def _station_loop(device_ip, generation):
                         _top_up(station)
                 _flush_queue(station, coordinator)
                 _evict(station)
+                _flush_history()
         except Exception as e:
             logger.warning(f"Station loop error for {device_ip}: {e}")
 
@@ -1909,6 +1973,7 @@ def end_station(device_ip):
                 download = _DOWNLOADS.get(vid)
                 if download is not None and download.state == 'queued':
                     download.cancel()
+    _flush_history(force=True)
 
 
 def _drop_pending_downloads(discarded):
@@ -3349,4 +3414,6 @@ if __name__ == '__main__':
     logger.info(f"Initializing app on stream host: {STREAM_HOST} (port {PORT})")
     _log_ytdlp_version()
     cache_scan()
+    _load_history()
+    atexit.register(lambda: _flush_history(force=True))
     app.run(host='0.0.0.0', port=PORT, threaded=True)
