@@ -1535,9 +1535,11 @@ def _widen_seed(station, rung, used):
     """One more seed id for ladder rung `rung`, or None if there isn't one.
 
     Rung 2 reaches further back into this station's own walk than _reseed_ids
-    does — its window is the last 8 tracks, so a station that has been orbiting
-    one sound for an hour is reseeding from inside that orbit. An older track
-    is a different neighbourhood and it is one we know the listener accepted.
+    does — _reseed_ids draws from the last 9 tracks (played_order[-1] plus one
+    from [-9:-1]), so [:-9] is the precise complement, everything _reseed_ids
+    cannot reach. A station that has been orbiting one sound for an hour is
+    reseeding from inside that orbit; an older track is a different
+    neighbourhood and it is one we know the listener accepted.
 
     Rung 3 leaves the walk entirely: a song some mix offered that we never
     queued. Its mix is by construction adjacent to this station's taste and by
