@@ -204,17 +204,19 @@ class TestMatchRules(unittest.TestCase):
         self.assertEqual(hit.reason, 'overlap')
 
     def test_rule_4_partial_overlap_below_threshold_stays_distinct(self):
-        # 2/3 = 0.67, below MATCH_OVERLAP (0.75). Guards the "Part 1 / Part 2"
+        # 2/3 = 0.67, below MATCH_OVERLAP (0.8). Guards the "Part 1 / Part 2"
         # case: two parts of one work are two songs and must stay distinct.
         self.mem.add(song('a', 'song part 1', duration=200))
         self.assertIsNone(self.mem.find(song('a', 'song part 2', duration=200)))
 
     def test_rule_4_partial_overlap_needs_the_durations_to_agree(self):
-        # True partial overlap (not subset): {one, two, three} vs {one, two, four}
-        # have 2/3 = 0.67 overlap, below MATCH_OVERLAP (0.8), so they stay distinct
-        # even with matching durations. Neither is a subset of the other.
-        self.mem.add(song('a', 'one two three', duration=200, vid='v1'))
-        self.assertIsNone(self.mem.find(song('a', 'one two four', duration=400, vid='v2')))
+        # Partial overlap at the threshold: {one, two, three, four, five} vs
+        # {one, two, three, four, six} share 4 tokens, ratio 4/5 = 0.8, just
+        # clearing MATCH_OVERLAP so the duration gate is reached. Durations far
+        # apart reject the match — without this check, two cuts of different
+        # length would collapse.
+        self.mem.add(song('a', 'one two three four five', duration=200, vid='v1'))
+        self.assertIsNone(self.mem.find(song('a', 'one two three four six', duration=400, vid='v2')))
 
     def test_containment_matches_a_short_query_against_a_longer_stored_title(self):
         # The query-short direction: stored title has extra tokens, query is
@@ -234,14 +236,21 @@ class TestMatchRules(unittest.TestCase):
                                  duration=330, vid='long'))
         self.assertEqual(hit.reason, 'subset')
 
+    def test_rule_4_partial_overlap_with_agreeing_durations_matches(self):
+        # The same token pair, now with durations close enough: the ratio passes
+        # and the durations confirm it, so the match is accepted. Without this
+        # the overlap rule could be deleted and only negative tests would notice.
+        self.mem.add(song('a', 'one two three four five', duration=200, vid='v1'))
+        hit = self.mem.find(song('a', 'one two three four six', duration=203, vid='v2'))
+        self.assertEqual(hit.reason, 'overlap')
+
     def test_an_unknown_duration_never_confirms_a_partial_match(self):
         # Corroboration we do not have is not corroboration. Flat entries
         # always carry a duration, so this is the resolved-metadata edge.
-        # True partial overlap (not subset): {one, two, three} vs {one, two, four}
-        # have 2/3 = 0.67 overlap, below MATCH_OVERLAP (0.8). Neither is a subset
-        # of the other, so without duration we cannot confirm the match.
-        self.mem.add(song('a', 'one two three', duration=None, vid='v1'))
-        self.assertIsNone(self.mem.find(song('a', 'one two four', duration=200, vid='v2')))
+        # Partial overlap at the threshold (4/5 = 0.8) clears the ratio gate,
+        # but one side has no duration, so the match cannot be confirmed.
+        self.mem.add(song('a', 'one two three four five', duration=None, vid='v1'))
+        self.assertIsNone(self.mem.find(song('a', 'one two three four six', duration=200, vid='v2')))
 
 
 class TestMemoryBookkeeping(unittest.TestCase):
