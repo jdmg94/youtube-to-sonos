@@ -231,5 +231,57 @@ class TestWalk(unittest.TestCase):
             )
 
 
+class TestExhaustedFlag(unittest.TestCase):
+    """Exhausted flag ownership: _pick_next sets it, _top_up must preserve it.
+
+    The defect this guards against: _pick_next rung 6 (_reserve_oldest) sets
+    station.exhausted = True and returns a valid entry (the oldest-first repeat),
+    but _top_up then overwrote it with False unconditionally, so the flag only
+    ever appeared True when _pick_next returned None — which the rung 6 floor
+    made nearly unreachable.
+    """
+
+    def setUp(self):
+        # Stub ensure_cached to a no-op: _top_up calls it on every entry it gets.
+        self._real_ensure = app.ensure_cached
+        app.ensure_cached = lambda *a, **k: None
+        self.addCleanup(lambda: setattr(app, 'ensure_cached', self._real_ensure))
+
+        # Constrain the loop to one iteration.
+        self._real_batch = app.TOPUP_BATCH
+        app.TOPUP_BATCH = 1
+        self.addCleanup(lambda: setattr(app, 'TOPUP_BATCH', self._real_batch))
+
+    def test_preserves_exhausted_when_pick_next_sets_it(self):
+        """_top_up must not overwrite station.exhausted when _pick_next sets it.
+
+        This is rung 6's contract: set exhausted = True, return a valid entry
+        (the oldest-first repeat). _top_up's line 1742 used to unconditionally
+        reset it to False, breaking the flag.
+        """
+        # Stub _pick_next to simulate rung 6: set exhausted, return an entry.
+        def mock_pick(station, refresh=False, fetch=None):
+            station.exhausted = True
+            return {'id': 'test_vid', 'title': 'Test Song',
+                    'uploader': 'Test Artist', 'duration': 180}
+
+        self._real_pick = app._pick_next
+        app._pick_next = mock_pick
+        self.addCleanup(lambda: setattr(app, '_pick_next', self._real_pick))
+
+        # Ruling B: second arg is generation counter, not seed id.
+        station = app.Station('10.0.0.1', 0)
+        station.exhausted = False
+
+        # Call _top_up — it should preserve the exhausted flag _pick_next set.
+        app._top_up(station)
+
+        # Assert: station.exhausted must still be True after _top_up.
+        self.assertTrue(
+            station.exhausted,
+            "_top_up overwrote exhausted flag that _pick_next set"
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

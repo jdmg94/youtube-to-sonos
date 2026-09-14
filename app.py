@@ -1727,6 +1727,10 @@ def _top_up(station, refresh=False):
     refetch is enough to replace the memoised mix that every later pick then
     reads, and asking again per pick would just spend round trips on data we
     already refreshed a moment ago.
+
+    `station.exhausted` is owned by `_pick_next` and reflects whether the last
+    pick came from the repeat floor (rung 6), not whether the station stopped.
+    This function must preserve whatever value `_pick_next` set.
     """
     target = _prefetch_target(station)
     added = 0
@@ -1739,7 +1743,6 @@ def _top_up(station, refresh=False):
                             f"{len(station.tracks)} track(s) queued")
                 station.exhausted = True
             return
-        station.exhausted = False
         meta = station.add(entry)
         added += 1
         try:
