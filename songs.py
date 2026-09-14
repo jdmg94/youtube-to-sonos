@@ -205,7 +205,7 @@ unanswerable and MATCH_OVERLAP can never be tuned from real behaviour.
 class Entry:
     artist: str
     tokens: frozenset
-    duration: float
+    duration: float | None
     ids: dict = field(default_factory=dict)   # video_id -> rank, insertion-ordered
     title: str = ''
     last_at: float = 0.0
@@ -234,21 +234,25 @@ def _match(a_tokens, a_duration, b_tokens, b_duration):
     stops `{intro}` swallowing `{intro, to, the, record}`: a one-word subset
     falls through and has to earn the match on duration instead.
 
-    Subset matching is directional: the query (a) must be a subset of the stored
-    entry (b). The reverse (stored ⊂ query) means the query has extra tokens that
-    might make it a different song, so those cases fall through to the overlap
-    check which requires duration corroboration.
+    Subset matching is symmetric because which side is "stored" is just which was
+    heard first. build_station_queue collapses songs to their best_id — the
+    lowest-ranked upload, which is the Topic / Official Audio cut — so memory
+    overwhelmingly holds short canonical titles while the variants (live, extended,
+    sped up, soundtrack) arrive later carrying the extra tokens. A directional
+    check refusing stored ⊂ query is exactly backwards for the common case, and
+    refusing it means the station plays the same song twice. Symmetry also makes
+    the memory order-independent: find(a) after add(b) must agree with find(b)
+    after add(a), or the same pair are duplicates or not depending on which the
+    mix offered first.
     """
     if a_tokens == b_tokens:
         return 'exact'
-    # Subset: query tokens are contained in stored tokens (only this direction!)
-    if a_tokens <= b_tokens and len(a_tokens) >= MATCH_MIN_SUBSET_TOKENS:
-        return 'subset'
-    # Overlap check uses the smaller set for percentage calculation
     small, large = ((a_tokens, b_tokens) if len(a_tokens) <= len(b_tokens)
                     else (b_tokens, a_tokens))
     if not small:
         return None
+    if small <= large and len(small) >= MATCH_MIN_SUBSET_TOKENS:
+        return 'subset'
     if len(small & large) / len(small) < MATCH_OVERLAP:
         return None
     # Corroboration we do not have is not corroboration.

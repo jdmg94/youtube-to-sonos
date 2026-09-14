@@ -174,7 +174,8 @@ class TestMatchRules(unittest.TestCase):
 
     def test_rule_2_an_empty_artist_bucket_is_not_a_duplicate(self):
         # The O(1) step that keeps fuzzy matching at hash speed, and the one
-        # that implements "a cover by another artist stays eligible".
+        # that implements "any version except covers": a cover by another artist
+        # stays eligible because the artist bucket is empty for that performer.
         self.mem.add(song('ellie goulding', 'love me like you do'))
         self.assertIsNone(self.mem.find(song('boyce avenue', 'love me like you do')))
 
@@ -203,24 +204,44 @@ class TestMatchRules(unittest.TestCase):
         self.assertEqual(hit.reason, 'overlap')
 
     def test_rule_4_partial_overlap_below_threshold_stays_distinct(self):
-        # 2/3 = 0.67. Two parts of one work are two songs.
+        # 2/3 = 0.67, below MATCH_OVERLAP (0.75). Guards the "Part 1 / Part 2"
+        # case: two parts of one work are two songs and must stay distinct.
         self.mem.add(song('a', 'song part 1', duration=200))
         self.assertIsNone(self.mem.find(song('a', 'song part 2', duration=200)))
 
     def test_rule_4_partial_overlap_needs_the_durations_to_agree(self):
-        self.mem.add(song('a', 'one two three four', duration=200))
-        self.assertIsNone(self.mem.find(song('a', 'one two three four five', duration=400)))
+        # True partial overlap (not subset): {one, two, three} vs {one, two, four}
+        # have 2/3 = 0.67 overlap, below MATCH_OVERLAP (0.8), so they stay distinct
+        # even with matching durations. Neither is a subset of the other.
+        self.mem.add(song('a', 'one two three', duration=200, vid='v1'))
+        self.assertIsNone(self.mem.find(song('a', 'one two four', duration=400, vid='v2')))
 
-    def test_containment_merges_a_taylors_version(self):
-        self.mem.add(song('taylor swift', 'love story taylors', duration=235))
-        hit = self.mem.find(song('taylor swift', 'love story', duration=356))
+    def test_containment_matches_a_short_query_against_a_longer_stored_title(self):
+        # The query-short direction: stored title has extra tokens, query is
+        # shorter. This exercises symmetric subset matching, though it is not
+        # the common direction in practice (see the new test below).
+        self.mem.add(song('taylor swift', 'love story taylors', duration=235, vid='stored'))
+        hit = self.mem.find(song('taylor swift', 'love story', duration=356, vid='query'))
+        self.assertEqual(hit.reason, 'subset')
+
+    def test_a_longer_variant_title_matches_the_stored_short_one(self):
+        # The common ordering: the canonical upload is heard first, so memory holds
+        # the short title and the variant arrives carrying the extra tokens.
+        # Durations differ well past MATCH_DURATION_TOLERANCE, so `overlap` cannot
+        # rescue this — only symmetric subset matching catches it.
+        self.mem.add(song('adele', 'someone like you', duration=285, vid='short'))
+        hit = self.mem.find(song('adele', 'someone like you live at the royal albert hall',
+                                 duration=330, vid='long'))
         self.assertEqual(hit.reason, 'subset')
 
     def test_an_unknown_duration_never_confirms_a_partial_match(self):
         # Corroboration we do not have is not corroboration. Flat entries
         # always carry a duration, so this is the resolved-metadata edge.
-        self.mem.add(song('a', 'one two three four', duration=None))
-        self.assertIsNone(self.mem.find(song('a', 'one two three four five', duration=200)))
+        # True partial overlap (not subset): {one, two, three} vs {one, two, four}
+        # have 2/3 = 0.67 overlap, below MATCH_OVERLAP (0.8). Neither is a subset
+        # of the other, so without duration we cannot confirm the match.
+        self.mem.add(song('a', 'one two three', duration=None, vid='v1'))
+        self.assertIsNone(self.mem.find(song('a', 'one two four', duration=200, vid='v2')))
 
 
 class TestMemoryBookkeeping(unittest.TestCase):
