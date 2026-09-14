@@ -300,8 +300,7 @@ class TestArtistCooldown(unittest.TestCase):
         station = app.Station('10.0.0.1', 0)
         station.artist_history = ['Artist A', 'Artist B', 'Artist C']
 
-        # Replicate the computation from app.py:1614.
-        cooldown = station.artist_history[-app.ARTIST_COOLDOWN:] if app.ARTIST_COOLDOWN > 0 else []
+        cooldown = app._cooldown_artists(station)
 
         self.assertEqual(
             cooldown, [],
@@ -317,12 +316,27 @@ class TestArtistCooldown(unittest.TestCase):
         station = app.Station('10.0.0.1', 0)
         station.artist_history = ['Artist A', 'Artist B', 'Artist C', 'Artist D']
 
-        # Replicate the computation from app.py:1614.
-        cooldown = station.artist_history[-app.ARTIST_COOLDOWN:] if app.ARTIST_COOLDOWN > 0 else []
+        cooldown = app._cooldown_artists(station)
 
         self.assertEqual(
             cooldown, ['Artist C', 'Artist D'],
             f"ARTIST_COOLDOWN=2 should produce last 2 artists"
+        )
+
+    def test_cooldown_negative_produces_empty_list(self):
+        """ARTIST_COOLDOWN=-1 should produce an empty cooldown list."""
+        old_cooldown = app.ARTIST_COOLDOWN
+        self.addCleanup(lambda: setattr(app, 'ARTIST_COOLDOWN', old_cooldown))
+
+        app.ARTIST_COOLDOWN = -1
+        station = app.Station('10.0.0.1', 0)
+        station.artist_history = ['Artist A', 'Artist B', 'Artist C']
+
+        cooldown = app._cooldown_artists(station)
+
+        self.assertEqual(
+            cooldown, [],
+            f"ARTIST_COOLDOWN=-1 should produce [], got {cooldown}"
         )
 
 

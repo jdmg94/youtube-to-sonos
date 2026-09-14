@@ -1554,6 +1554,19 @@ def _widen_seed(station, rung, used):
     return None
 
 
+def _cooldown_artists(station):
+    """Artists to push down the running order, most recent ARTIST_COOLDOWN.
+
+    Written as an explicit guard rather than a slice because
+    artist_history[-0:] is artist_history[0:] — the whole list — so a bare
+    slice turns ARTIST_COOLDOWN=0 into the maximum cooldown instead of none.
+    Negative values mean the same as zero.
+    """
+    if ARTIST_COOLDOWN <= 0:
+        return []
+    return station.artist_history[-ARTIST_COOLDOWN:]
+
+
 def _reserve_oldest(station):
     """The floor: re-serve the song heard longest ago.
 
@@ -1613,7 +1626,7 @@ def _pick_next(station, refresh=False, fetch=None):
         return None
 
     seeds = _reseed_ids(station.played_order)
-    cooldown = station.artist_history[-ARTIST_COOLDOWN:] if ARTIST_COOLDOWN > 0 else []
+    cooldown = _cooldown_artists(station)
     entries = []
     for seed in seeds:
         entries.extend(fetch(seed, refresh=refresh))
