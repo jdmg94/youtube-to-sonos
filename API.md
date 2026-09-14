@@ -489,7 +489,10 @@ inspectable.
 number of songs returned. The default is enough to answer "why did it skip that
 song" without returning the full 2000-entry cap.
 
-**200** always, even when the history is empty (`songs: []`).
+**400** `{"error": "limit must be an integer"}` when `limit` will not parse as
+an int. Values that parse but are out of range (`0`, `-5`, `999999`) are
+silently clamped, not rejected. **200** otherwise, including when the history is
+empty (`songs: []`).
 
 ---
 
