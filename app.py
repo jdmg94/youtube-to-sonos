@@ -1610,6 +1610,7 @@ def _pick_next(station, refresh=False, fetch=None):
     with _STATE_LOCK:
         queue = build_station_queue(entries, [station.memory, _HISTORY],
                                     cooldown_artists=cooldown,
+                                    max_per_artist=MAX_TRACKS_PER_ARTIST,
                                     on_reject=_log_reject)
     if queue:
         # Back to normal: forget that we ever had to widen, so the next lean
@@ -1631,6 +1632,7 @@ def _pick_next(station, refresh=False, fetch=None):
         with _STATE_LOCK:
             queue = build_station_queue(entries, [station.memory, _HISTORY],
                                         cooldown_artists=cooldown,
+                                        max_per_artist=MAX_TRACKS_PER_ARTIST,
                                         on_reject=_log_reject)
         if queue:
             station.exhausted = False
@@ -1639,7 +1641,8 @@ def _pick_next(station, refresh=False, fetch=None):
     # Rung 4: drop the 7-day memory. The station's own list still holds, so
     # this repeats nothing within the session — only something from days ago.
     queue = build_station_queue(entries, [station.memory],
-                                cooldown_artists=cooldown)
+                                cooldown_artists=cooldown,
+                                max_per_artist=MAX_TRACKS_PER_ARTIST)
     if queue:
         station.exhausted = False
         return _choose(station, queue, entries)
