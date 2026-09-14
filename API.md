@@ -240,7 +240,7 @@ browser.
 | Field | Meaning |
 | --- | --- |
 | `index` | 0-based cursor into `tracks`. |
-| `exhausted` | The station could not find any more unheard tracks. |
+| `exhausted` | The station has run out of unheard songs and is re-serving heard ones, oldest first. The station is still producing tracks; the UI surfaces this to the listener as a notice. |
 | `id` | Video id. Note: `id`, not `video_id` — unlike the now-playing payload. |
 | `cached` | `"done"` \| `"running"` \| `"queued"` \| `"failed"` \| `"missing"` |
 | `queue_pos` | 1-based Sonos queue position, or `null` if not yet enqueued. |
@@ -443,6 +443,53 @@ urgent download" and "scheduler wedged" look identical from outside.
 `priority` is distance from what the speaker needs: `-1` an open `/media`
 socket, `0` the track under the cursor, `N` for N tracks ahead. Lower is more
 urgent. `priority` is `null` for a download that is neither running nor pending.
+
+---
+
+## `GET /api/history`
+
+What the app remembers hearing, newest first. Like `/api/downloads`, this is
+read-only, touches no speaker, and exists to make an invisible decision
+inspectable.
+
+```json
+{
+  "version": 1,
+  "total": 1,
+  "max": 2000,
+  "ttl": 604800.0,
+  "songs": [
+    {
+      "id": "bbb",
+      "ids": ["bbb", "aaa"],
+      "artist": "kate bush",
+      "title": "Kate Bush - Running Up That Hill",
+      "duration": 300.0,
+      "heard": true,
+      "age": 0.0
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `total` | Total songs in the history (before `limit` was applied). |
+| `max` | `HISTORY_MAX`, the cap on how many songs are remembered. |
+| `ttl` | `HISTORY_TTL`, how long a heard song stays excluded. |
+| `id` | The best-ranked video id for this song — the version the matcher prefers. |
+| `ids` | All video ids the matcher has decided are this song. Two ids on one row means the matcher merged them — which is the feature working, and also the one place a false positive becomes visible. The first example shows two uploads of "Running Up That Hill" merged into one song. |
+| `heard` | `true` when the station loop saw this song reach `PLAYING` on the speaker; `false` when it was only queued but never reached. Only heard songs are candidates for the repeat floor. |
+| `age` | Seconds since `last_at`. |
+
+`artist` and `title` are stored folded and normalized, so the lowercase
+`"kate bush"` is correct, not a bug.
+
+**Query parameter `limit`** (default 100, clamped to 1..`HISTORY_MAX`): caps the
+number of songs returned. The default is enough to answer "why did it skip that
+song" without returning the full 2000-entry cap.
+
+**200** always, even when the history is empty (`songs: []`).
 
 ---
 
