@@ -405,3 +405,110 @@ class SongMemory:
             for vid in entry.ids:
                 self._by_id[vid] = entry
         self.dirty = True
+
+    def snapshot(self):
+        """The memory as plain JSON-able data, for writing outside the lock.
+
+        Called under whatever lock guards the memory; the returned structure
+        shares nothing mutable with it, so the caller can release the lock and
+        then spend as long as it likes serialising.
+
+        Clears `dirty` because from here on the on-disk copy is current as of
+        this moment — a write that fails leaves the flag down and loses at most
+        one interval's worth of history, which is the right trade against
+        re-dumping 2000 entries every tick.
+        """
+        self.prune()
+        self.dirty = False
+        return {
+            'version': HISTORY_VERSION,
+            # Heard entries only. A queued-but-never-reached song is excluded
+            # for HISTORY_QUEUED_TTL so a *running* station doesn't queue it
+            # twice; once the process restarts that station is gone and the
+            # song was never played, so carrying the exclusion across would
+            # hide a song for two hours for no reason at all.
+            'entries': [
+                {
+                    'artist': e.artist,
+                    'tokens': sorted(e.tokens),
+                    'duration': e.duration,
+                    'ids': dict(e.ids),
+                    'title': e.title,
+                    'last_at': e.last_at,
+                    'heard': True,
+                }
+                for e in self._entries if e.heard
+            ],
+        }
+
+    def restore(self, payload):
+        """Load a snapshot, dropping anything already expired.
+
+        `None` is a valid argument and means "there was nothing to load" —
+        first run, a missing file, a corrupt one, or a version we don't read.
+        All four are the same situation to this class and none of them is an
+        error worth refusing to start over.
+        """
+        if not payload:
+            return
+        now = time.time()
+        for raw in payload.get('entries', ()):
+            try:
+                entry = Entry(
+                    artist=raw['artist'],
+                    tokens=frozenset(raw['tokens']),
+                    duration=raw.get('duration'),
+                    ids=dict(raw.get('ids') or {}),
+                    title=raw.get('title', ''),
+                    last_at=float(raw.get('last_at') or 0.0),
+                    heard=bool(raw.get('heard')),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue  # one malformed row must not cost the other 1999
+            self._insert(entry)
+        self.prune(now)
+        self.dirty = False
+
+
+def load_history(path):
+    """The saved memory, or None if there isn't a usable one.
+
+    Every failure mode collapses to None on purpose. A missing file is a first
+    run, a corrupt one is a crash mid-write that the atomic rename should have
+    prevented, and a version we don't recognise is a downgrade. None of them
+    should stop the app starting, and all of them mean the same thing to the
+    caller: begin with an empty memory.
+    """
+    try:
+        with open(path, 'r') as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        logger.warning(f"Ignoring unreadable history at {path}: {exc}")
+        return None
+    if not isinstance(payload, dict) or payload.get('version') != HISTORY_VERSION:
+        logger.info(f"Discarding history at {path}: unsupported version")
+        return None
+    return payload
+
+
+def save_history(path, payload):
+    """Write a snapshot, atomically.
+
+    `.part` + rename, the same discipline the audio cache uses, for the same
+    reason: this is written on a timer and at shutdown, so a kill lands mid-
+    write eventually. A half-written file would be read back as corrupt and
+    silently discarded — losing exactly the history this is here to keep.
+    """
+    tmp = f"{path}.part"
+    try:
+        with open(tmp, 'w') as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning(f"Could not save history to {path}: {exc}")
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass

@@ -358,5 +358,108 @@ class TestHeardAndExpiry(unittest.TestCase):
         self.assertIsNone(songs.SongMemory().oldest_heard())
 
 
+class TestPersistence(unittest.TestCase):
+    def test_round_trip_preserves_matching(self):
+        # Matching, not just storage, is what has to survive the round trip.
+        mem = songs.SongMemory()
+        mem.add(songs.attribute(SYN['syn_topic']), heard=True)
+        payload = mem.snapshot()
+        fresh = songs.SongMemory()
+        fresh.restore(payload)
+        # A different upload of the same song still hits it
+        hit = fresh.find(songs.attribute(SYN['syn_video']))
+        self.assertIsNotNone(hit)
+        # oldest_heard returns it
+        self.assertIsNotNone(fresh.oldest_heard())
+
+    def test_unheard_entries_are_not_persisted(self):
+        # The Global Constraint: only heard entries are persisted.
+        mem = songs.SongMemory()
+        mem.add(song('a', 'heard one'), heard=True)
+        mem.add(song('a', 'queued only'), heard=False)
+        payload = mem.snapshot()
+        self.assertEqual(len(payload['entries']), 1)
+        self.assertEqual(payload['entries'][0]['title'], 'a - heard one')
+
+    def test_round_trip_through_disk(self):
+        import tempfile
+        mem = songs.SongMemory()
+        mem.add(song('a', 'one two'), heard=True)
+        payload1 = mem.snapshot()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, 'history.json')
+            songs.save_history(path, payload1)
+            payload2 = songs.load_history(path)
+        self.assertEqual(payload1, payload2)
+
+    def test_missing_file_is_empty(self):
+        payload = songs.load_history('/nonexistent/path/history.json')
+        self.assertIsNone(payload)
+        mem = songs.SongMemory()
+        mem.restore(None)
+        self.assertEqual(len(mem), 0)
+
+    def test_corrupt_file_is_empty(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, 'corrupt.json')
+            with open(path, 'w') as fh:
+                fh.write('{not json')
+            payload = songs.load_history(path)
+        self.assertIsNone(payload)
+
+    def test_version_mismatch_discards(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, 'old.json')
+            old_payload = {'version': 0, 'entries': []}
+            with open(path, 'w') as fh:
+                json.dump(old_payload, fh)
+            payload = songs.load_history(path)
+        self.assertIsNone(payload)
+
+    def test_restore_prunes_expired(self):
+        mem = songs.SongMemory(ttl=7 * 24 * 3600)
+        # 8 days old, past the TTL
+        payload = {
+            'version': songs.HISTORY_VERSION,
+            'entries': [{
+                'artist': 'a',
+                'tokens': ['old'],
+                'duration': 200,
+                'ids': {'v1': 2},
+                'title': 'a - old',
+                'last_at': 0.0,
+                'heard': True,
+            }]
+        }
+        mem.restore(payload)
+        # Restore with current time, 8 days later
+        now = 8 * 24 * 3600
+        mem.prune(now)
+        self.assertEqual(len(mem), 0)
+
+    def test_save_is_atomic(self):
+        import tempfile
+        mem = songs.SongMemory()
+        mem.add(song('a', 'one two'), heard=True)
+        payload = mem.snapshot()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, 'history.json')
+            songs.save_history(path, payload)
+            # No .part file remains
+            self.assertFalse(os.path.exists(f"{path}.part"))
+            # Target parses
+            loaded = songs.load_history(path)
+            self.assertIsNotNone(loaded)
+
+    def test_snapshot_clears_dirty(self):
+        mem = songs.SongMemory()
+        mem.add(song('a', 'one two'), heard=True)
+        self.assertTrue(mem.dirty)
+        mem.snapshot()
+        self.assertFalse(mem.dirty)
+
+
 if __name__ == '__main__':
     unittest.main()
