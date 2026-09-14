@@ -41,7 +41,7 @@ ENV CACHE_DIR=/app/cache
 # Every module app.py imports must be listed. It is not a package and there is
 # no setup.py to catch an omission — a missing file here builds and pushes
 # cleanly, then dies at startup on ModuleNotFoundError.
-COPY app.py hue.py analysis.py .
+COPY app.py hue.py analysis.py songs.py .
 
 EXPOSE 5001
 
