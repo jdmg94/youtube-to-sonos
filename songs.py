@@ -32,6 +32,11 @@ MATCH_MIN_SUBSET_TOKENS = 2
 MATCH_OVERLAP = 0.8
 MATCH_DURATION_TOLERANCE = 5.0
 
+# Artist cap: how many tracks from one artist may appear in one built queue.
+# Tunable deployment knob lives in app.py; the default is here so downstream
+# calls need not know what app.py's env-var default is.
+MAX_TRACKS_PER_ARTIST = 2
+
 # Bumped whenever `attribute` semantics change. An index persisted under an old
 # tokenizer is silently wrong for a week; a version mismatch discards the file
 # and converts that into one cold start.
@@ -512,3 +517,91 @@ def save_history(path, payload):
             os.unlink(tmp)
         except OSError:
             pass
+
+
+# --- Queue building ----------------------------------------------------------
+
+
+def build_station_queue(entries, memories, cooldown_artists=(),
+                        max_per_artist=MAX_TRACKS_PER_ARTIST, on_reject=None):
+    """Turn raw mix entries into a varied, non-repeating queue.
+
+    entries:  iterable of yt-dlp flat-extract dicts, in relevance order.
+              The caller has already fetched and concatenated the seed mixes.
+    memories: iterable of SongMemory to exclude against, consulted in order.
+              Two in production — the station's own and the 7-day history —
+              and the ladder's rungs 4 and 5 work by passing fewer of them.
+    cooldown_artists: artists that should appear after fresh ones in the queue.
+    max_per_artist: cap on tracks from one artist in the built queue.
+    on_reject: optional callable(entry, reason) invoked for each candidate
+              dropped by a *fuzzy* match ('exact'/'subset'/'overlap', never
+              'id'). This is how the rejection log in Task 9 gets its data
+              without this function knowing what a logger is.
+
+    Returns a list of entries, each carrying an added 'id' rewritten to the
+    best-ranked upload of that song.
+    """
+    cooldown = {a for a in cooldown_artists if a}
+    memories = list(memories)
+
+    # 1. Collapse the pool onto itself.
+    #
+    # `pool` is a throwaway SongMemory used as an accumulator, which is what
+    # makes "two uploads of one song" and "an upload of a song I already
+    # played" the same comparison instead of two hand-rolled ones. Its TTL and
+    # cap are irrelevant — nothing is ever pruned from it — so it is built with
+    # the defaults and discarded.
+    pool = SongMemory()
+    slots = []            # Entry objects in first-seen order
+    for raw in entries:
+        song = attribute(raw)
+        if not song.video_id:
+            continue
+
+        hit = None
+        for memory in memories:
+            hit = memory.find(song)
+            if hit:
+                break
+        if hit:
+            if on_reject and hit.reason != 'id':
+                on_reject(raw, hit.reason)
+            continue
+
+        seen = pool.find(song)
+        if seen is None:
+            entry = pool.add(song)
+            entry.raw = raw          # keep the dict; the caller enqueues it
+            slots.append(entry)
+        else:
+            # Same song, second upload. `add` merges the id at its rank, so
+            # `best_id()` now answers with whichever upload ranks lower. The
+            # slot stays where the first one put it.
+            pool.add(song)
+
+    # 2. Bucket by artist and cap.
+    buckets = {}
+    order = []
+    for entry in slots:
+        akey = entry.artist or entry.best_id()   # unknown artist -> unique
+        if akey not in buckets:
+            buckets[akey] = []
+            order.append(akey)
+        if len(buckets[akey]) < max_per_artist:
+            buckets[akey].append(entry)
+
+    # 3. Fresh artists before cooled-down ones (stable, so relevance survives).
+    order.sort(key=lambda a: a in cooldown)
+
+    # 4. Round-robin -> no artist back to back.
+    queue = []
+    while any(buckets[a] for a in order):
+        for a in order:
+            if buckets[a]:
+                entry = buckets[a].pop(0)
+                out = dict(entry.raw)
+                # The one field this function rewrites: play the best upload of
+                # the song, not the one the mix happened to list first.
+                out['id'] = entry.best_id()
+                queue.append(out)
+    return queue

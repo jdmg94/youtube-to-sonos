@@ -461,5 +461,141 @@ class TestPersistence(unittest.TestCase):
         self.assertFalse(mem.dirty)
 
 
+class TestBuildQueue(unittest.TestCase):
+    def test_drops_ids_already_in_memory(self):
+        # An entry whose id is in a passed memory never appears.
+        mem = songs.SongMemory()
+        mem.add(song('a', 'one two', vid='v1'))
+        entries = [{'id': 'v1', 'title': 'A - One Two', 'uploader': 'A', 'duration': 200}]
+        queue = songs.build_station_queue(entries, [mem])
+        self.assertEqual(len(queue), 0)
+
+    def test_drops_fuzzy_match_in_memory(self):
+        # Memory holds "Dua Lipa - Levitating"; a Topic upload is dropped,
+        # and on_reject was called once with reason 'exact'.
+        mem = songs.SongMemory()
+        mem.add(songs.attribute(SYN['syn_video']))
+        entries = [SYN['syn_topic']]
+        rejections = []
+        queue = songs.build_station_queue(entries, [mem],
+                                          on_reject=lambda e, r: rejections.append((e['id'], r)))
+        self.assertEqual(len(queue), 0)
+        self.assertEqual(len(rejections), 1)
+        self.assertEqual(rejections[0], ('syn_topic', 'exact'))
+
+    def test_collapses_versions_within_the_pool(self):
+        # A mix containing both "Official Video" and a Topic upload yields ONE entry.
+        entries = [SYN['syn_video'], SYN['syn_topic']]
+        queue = songs.build_station_queue(entries, [])
+        self.assertEqual(len(queue), 1)
+
+    def test_collapsed_entry_uses_the_audio_upload(self):
+        # For the video/topic pair, the surviving entry's id is the Topic upload's id,
+        # and its position in the result is the position of whichever appeared first
+        # in the mix. Rank decides the file; mix order decides the slot.
+        entries = [SYN['syn_video'], SYN['syn_topic']]
+        queue = songs.build_station_queue(entries, [])
+        self.assertEqual(queue[0]['id'], 'syn_topic')
+
+    def test_unmarked_beats_official_video(self):
+        # Rank 2 wins over rank 3, so an unmarked upload is preferred to a music video.
+        entries = [
+            {'id': 'v_unmarked', 'title': 'Artist - Song', 'uploader': 'Artist', 'duration': 200},
+            {'id': 'v_video', 'title': 'Artist - Song (Official Music Video)',
+             'uploader': 'Artist', 'duration': 200}
+        ]
+        queue = songs.build_station_queue(entries, [])
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]['id'], 'v_unmarked')
+
+    def test_cover_by_another_artist_survives(self):
+        # A different-artist cover of a memorised song is kept. This is the user's
+        # "any version except covers" line and it is the one rule that costs recall
+        # to honour.
+        mem = songs.SongMemory()
+        mem.add(songs.attribute(SYN['syn_videogames']))
+        entries = [SYN['syn_cover']]
+        queue = songs.build_station_queue(entries, [mem])
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]['id'], 'syn_cover')
+
+    def test_artist_cap(self):
+        # Five entries from one artist with max_per_artist=2 yield two.
+        entries = [
+            {'id': f'v{i}', 'title': f'Artist - Song {i}', 'uploader': 'Artist', 'duration': 200}
+            for i in range(5)
+        ]
+        queue = songs.build_station_queue(entries, [], max_per_artist=2)
+        self.assertEqual(len(queue), 2)
+
+    def test_no_back_to_back_same_artist(self):
+        # With three artists × two tracks, no two adjacent results share an artist.
+        entries = []
+        for artist in ('A', 'B', 'C'):
+            for i in range(2):
+                entries.append({
+                    'id': f'{artist}{i}', 'title': f'{artist} - Song {i}',
+                    'uploader': artist, 'duration': 200
+                })
+        queue = songs.build_station_queue(entries, [])
+        # Extract artists from the queue
+        artists = [songs.attribute(e).artist for e in queue]
+        # Check no two adjacent artists are the same
+        for i in range(len(artists) - 1):
+            self.assertNotEqual(artists[i], artists[i + 1])
+
+    def test_cooldown_artists_ordered_last(self):
+        # A cooled-down artist's first track appears after every fresh artist's
+        # first track, but is not dropped.
+        entries = [
+            {'id': 'cool1', 'title': 'Cooled - Song 1', 'uploader': 'Cooled', 'duration': 200},
+            {'id': 'fresh1', 'title': 'Fresh - Song 1', 'uploader': 'Fresh', 'duration': 200},
+            {'id': 'another1', 'title': 'Another - Song 1', 'uploader': 'Another', 'duration': 200},
+        ]
+        queue = songs.build_station_queue(entries, [], cooldown_artists=['cooled'])
+        artists = [songs.attribute(e).artist for e in queue]
+        # The cooled artist's first track appears after the fresh artists' first tracks
+        first_cooled = next((i for i, a in enumerate(artists) if a == 'cooled'), None)
+        self.assertIsNotNone(first_cooled)
+        # Both fresh artists appear before the cooled one
+        self.assertGreater(first_cooled, 0)
+        self.assertEqual(artists[0], 'fresh')
+        self.assertEqual(artists[1], 'another')
+
+    def test_unknown_artist_treated_as_unique(self):
+        # Two entries with no resolvable artist do not share a bucket and are
+        # not capped against each other.
+        entries = [
+            {'id': 'v1', 'title': 'Song 1', 'channel_id': 'UC001', 'duration': 200},
+            {'id': 'v2', 'title': 'Song 2', 'channel_id': 'UC002', 'duration': 200},
+        ]
+        queue = songs.build_station_queue(entries, [], max_per_artist=1)
+        # Both should survive because they have different channel_ids (fallback artist)
+        self.assertEqual(len(queue), 2)
+
+    def test_empty_entries_yields_empty(self):
+        # No exception, no None.
+        queue = songs.build_station_queue([], [])
+        self.assertEqual(queue, [])
+
+    def test_no_memories_is_legal(self):
+        # memories=() returns the whole collapsed pool; this is rung 5 of the
+        # ladder with the artist cap lifted.
+        entries = [SYN['syn_video'], SYN['syn_topic']]
+        queue = songs.build_station_queue(entries, memories=())
+        self.assertEqual(len(queue), 1)
+
+    def test_on_reject_not_called_for_id_matches(self):
+        # An exact-id drop is not a fuzzy decision and must not be logged as one,
+        # or the log fills with the normal case.
+        mem = songs.SongMemory()
+        mem.add(song('a', 'one two', vid='v1'))
+        entries = [{'id': 'v1', 'title': 'A - One Two', 'uploader': 'A', 'duration': 200}]
+        rejections = []
+        songs.build_station_queue(entries, [mem],
+                                  on_reject=lambda e, r: rejections.append((e['id'], r)))
+        self.assertEqual(len(rejections), 0)
+
+
 if __name__ == '__main__':
     unittest.main()
