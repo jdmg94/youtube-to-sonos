@@ -674,8 +674,17 @@ def _reseed_ids(played_order):
 
 
 def _log_reject(entry, reason):
-    """Rejection callback for build_station_queue. Filled in by Task 9."""
-    pass
+    """Report a candidate dropped by a fuzzy match.
+
+    Called by build_station_queue via on_reject, which already filters out id
+    matches (songs.py:567). An id match is the normal case and logging it would
+    bury the judgements — 'exact' (same token set, different upload), 'subset'
+    (one title contained in the other), 'overlap' (80% of tokens plus a duration
+    within 5s) — which are the rules that can be wrong.
+    """
+    logger.info(
+        f"Dedupe[{reason}] dropped {entry.get('id')} "
+        f"{entry.get('title')!r} by {entry.get('uploader') or entry.get('channel')!r}")
 
 # --- Download cache ----------------------------------------------------------
 
@@ -2719,6 +2728,59 @@ def downloads_view():
         } for vid, d in _DOWNLOADS.items()]
     return jsonify({'workers': DOWNLOAD_WORKERS, 'gate': PREFETCH_GATE,
                     'running': running, 'pending': pending, 'downloads': rows})
+
+
+@app.route('/api/history')
+def history():
+    """What the app remembers hearing, newest first.
+
+    Modelled on /api/downloads: read-only, no speaker call, and its purpose is
+    to make an invisible decision inspectable. `limit` caps the response
+    because HISTORY_MAX is 2000 and the default 100 is enough to answer 'why
+    did it skip that song'.
+    """
+    try:
+        limit = int(request.args.get('limit', 100))
+    except (ValueError, TypeError):
+        return jsonify({'error': 'limit must be an integer'}), 400
+    limit = max(1, min(limit, HISTORY_MAX))
+    now = time.time()
+    # Materialise every field we need under the lock because Entry.ids is a
+    # plain dict that SongMemory.add mutates in place when it merges a new
+    # upload. sorted(e.ids, ...) racing that mutation raises RuntimeError.
+    with _STATE_LOCK:
+        total = len(_HISTORY)
+        rows = [
+            {
+                'id': e.best_id(),
+                'ids': sorted(e.ids, key=lambda v: e.ids[v]),
+                'title': e.title,
+                'artist': e.artist,
+                'duration': e.duration,
+                'heard': e.heard,
+                'last_at': e.last_at,
+            }
+            for e in _HISTORY.entries(now)
+        ]
+    rows.sort(key=lambda r: r['last_at'], reverse=True)
+    return jsonify({
+        'total': total,
+        'version': songs.HISTORY_VERSION,
+        'ttl': HISTORY_TTL,
+        'max': HISTORY_MAX,
+        'songs': [
+            {
+                'id': r['id'],
+                'ids': r['ids'],
+                'title': r['title'],
+                'artist': r['artist'],
+                'duration': r['duration'],
+                'heard': r['heard'],
+                'age': round(now - r['last_at'], 1),
+            }
+            for r in rows[:limit]
+        ],
+    })
 
 
 @app.route('/api/stop', methods=['POST'])
