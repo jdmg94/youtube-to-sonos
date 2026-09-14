@@ -1611,7 +1611,7 @@ def _pick_next(station, refresh=False, fetch=None):
         return None
 
     seeds = _reseed_ids(station.played_order)
-    cooldown = station.artist_history[-ARTIST_COOLDOWN:]
+    cooldown = station.artist_history[-ARTIST_COOLDOWN:] if ARTIST_COOLDOWN > 0 else []
     entries = []
     for seed in seeds:
         entries.extend(fetch(seed, refresh=refresh))

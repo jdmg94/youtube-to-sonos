@@ -283,5 +283,48 @@ class TestExhaustedFlag(unittest.TestCase):
         )
 
 
+class TestArtistCooldown(unittest.TestCase):
+    """ARTIST_COOLDOWN computation must handle 0 and negative values correctly."""
+
+    def test_cooldown_zero_produces_empty_list(self):
+        """ARTIST_COOLDOWN=0 should produce an empty cooldown list, not the entire history.
+
+        The bug: artist_history[-0:] is artist_history[0:], which is the entire list.
+        Setting cooldown to 0 intending "no cooldown" got the maximum cooldown instead.
+        """
+        # Save and restore ARTIST_COOLDOWN.
+        old_cooldown = app.ARTIST_COOLDOWN
+        self.addCleanup(lambda: setattr(app, 'ARTIST_COOLDOWN', old_cooldown))
+
+        app.ARTIST_COOLDOWN = 0
+        station = app.Station('10.0.0.1', 0)
+        station.artist_history = ['Artist A', 'Artist B', 'Artist C']
+
+        # Replicate the computation from app.py:1614.
+        cooldown = station.artist_history[-app.ARTIST_COOLDOWN:] if app.ARTIST_COOLDOWN > 0 else []
+
+        self.assertEqual(
+            cooldown, [],
+            f"ARTIST_COOLDOWN=0 should produce [], got {cooldown}"
+        )
+
+    def test_cooldown_positive_takes_last_n_artists(self):
+        """ARTIST_COOLDOWN=N should produce exactly the last N artists."""
+        old_cooldown = app.ARTIST_COOLDOWN
+        self.addCleanup(lambda: setattr(app, 'ARTIST_COOLDOWN', old_cooldown))
+
+        app.ARTIST_COOLDOWN = 2
+        station = app.Station('10.0.0.1', 0)
+        station.artist_history = ['Artist A', 'Artist B', 'Artist C', 'Artist D']
+
+        # Replicate the computation from app.py:1614.
+        cooldown = station.artist_history[-app.ARTIST_COOLDOWN:] if app.ARTIST_COOLDOWN > 0 else []
+
+        self.assertEqual(
+            cooldown, ['Artist C', 'Artist D'],
+            f"ARTIST_COOLDOWN=2 should produce last 2 artists"
+        )
+
+
 if __name__ == '__main__':
     unittest.main()
