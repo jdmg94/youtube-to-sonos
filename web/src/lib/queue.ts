@@ -20,6 +20,10 @@ export const UNTITLED = "Untitled";
 /** A track with no channel. Not "Unknown" — every one of these is from YouTube. */
 export const UNKNOWN_UPLOADER = "YouTube";
 
+/** Shown when the station has run out of new songs and is replaying old ones. */
+export const EXHAUSTED =
+  "Out of new songs for this station — replaying ones you've heard, oldest first.";
+
 /**
  * A track's download state, reduced to what the row actually distinguishes.
  *
@@ -343,5 +347,19 @@ export function describeRemove(
     return { ok: false, message: "That track is already playing" };
   }
   return { ok: true, index, id: track.id };
+}
+
+/**
+ * The banner for a station that has started repeating itself, or null.
+ *
+ * `exhausted` no longer means the queue stopped — with the oldest-first floor
+ * the station always has something to play — so this is an explanation, not an
+ * error. Returning null for the normal case keeps the caller a single
+ * conditional render rather than a string comparison.
+ */
+export function describeExhausted(
+  station: StationBody | null | undefined,
+): string | null {
+  return station?.exhausted ? EXHAUSTED : null;
 }
 

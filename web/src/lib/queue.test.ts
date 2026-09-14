@@ -14,10 +14,12 @@ import { describe, it } from "node:test";
 
 import type { CacheState, StationBody, StationTrack } from "@/lib/api/types";
 import {
+  EXHAUSTED,
   NO_TRACKS,
   UNKNOWN_UPLOADER,
   UNTITLED,
   canRefresh,
+  describeExhausted,
   describeJump,
   describeQueue,
   describeRefresh,
@@ -585,5 +587,26 @@ describe("the words the user actually reads", () => {
     // An empty station is the normal state before the first play, not a
     // failure to load.
     assert.equal(NO_TRACKS, "No tracks queued yet");
+  });
+});
+
+describe("describeExhausted", () => {
+  it("returns null for a healthy station", () => {
+    const result = describeExhausted(station({ exhausted: false }));
+    assert.equal(result, null);
+  });
+
+  it("returns null for no station", () => {
+    // The panel renders before the first SSE frame, so both null and
+    // undefined must be handled.
+    assert.equal(describeExhausted(null), null);
+    assert.equal(describeExhausted(undefined), null);
+  });
+
+  it("explains a repeating station", () => {
+    // Assert on the exported constant, not on a literal, so the copy can
+    // change without touching the test.
+    const result = describeExhausted(station({ exhausted: true }));
+    assert.equal(result, EXHAUSTED);
   });
 });

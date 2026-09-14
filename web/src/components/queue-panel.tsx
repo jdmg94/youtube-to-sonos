@@ -10,6 +10,7 @@ import { useErrorToast } from "@/lib/hooks/use-error-toast";
 import { useQueueActions } from "@/lib/hooks/use-queue-actions";
 import {
   canRefresh,
+  describeExhausted,
   describeQueue,
   describeRefresh,
   NO_TRACKS,
@@ -107,6 +108,13 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
          * pixel the panels above it needed.
          */
         <div className="thin-scrollbar flex max-h-[60vh] grow flex-col gap-[0.4rem] overflow-y-auto pr-[0.4rem] min-[901px]:max-h-none min-[901px]:overflow-y-visible min-[901px]:pr-0">
+          {describeExhausted(queue.station) && (
+            <div className="mb-2 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[0.8rem] text-amber-200">
+              <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0" />
+              <p>{describeExhausted(queue.station)}</p>
+            </div>
+          )}
+
           {upcoming.length > 0 && (
             <QueueList
               rows={upcoming}
