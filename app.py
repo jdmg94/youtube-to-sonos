@@ -1635,7 +1635,7 @@ def _pick_next(station, refresh=False, fetch=None):
     # that needs both climbs on the next tick, which costs seconds, not the
     # tens of seconds a loop over both rungs would cost every tick.
     rung = 2 + min(station.widen, 1)
-    station.widen += 1          # next call tries the other rung
+    station.widen += 1          # 0→2, 1→3, then 3 until rung 1 resets
     extra = _widen_seed(station, rung, seeds)
     if extra:
         entries.extend(fetch(extra, refresh=refresh))
