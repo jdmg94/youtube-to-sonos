@@ -122,6 +122,87 @@ class TestArtist(unittest.TestCase):
         song = songs.attribute({'id': 'x', 'title': '', 'channel_id': 'UCzzz'})
         self.assertEqual(song.artist, 'UCzzz')
 
+    def test_collab_credit_collapses_to_first_artist(self):
+        # Task 15: "Beéle, Ovy On The Drums - mi refe" should yield artist='beele'
+        # so it matches "Beéle - mi refe" (the solo credit).
+        collab = songs.attribute({
+            'id': 'collab_id',
+            'title': 'Beéle, Ovy On The Drums - mi refe (Video Oficial)',
+            'uploader': 'Beéle',
+            'duration': 185
+        })
+        solo = songs.attribute({
+            'id': 'solo_id',
+            'title': 'Beéle - mi refe (Lyrics/Letra)',
+            'uploader': 'Beéle',
+            'duration': 185
+        })
+        self.assertEqual(collab.artist, 'beele')
+        self.assertEqual(solo.artist, 'beele')
+        self.assertEqual(collab.tokens, solo.tokens)
+
+    def test_collab_and_solo_dedupe_in_memory(self):
+        # Task 15: memory-level test. add() collab, find() solo -> hit.
+        mem = songs.SongMemory()
+        collab = songs.attribute({
+            'id': 'collab_id',
+            'title': 'Beéle, Ovy On The Drums - mi refe',
+            'uploader': 'Beéle',
+            'duration': 185
+        })
+        solo = songs.attribute({
+            'id': 'solo_id',
+            'title': 'Beéle - mi refe',
+            'uploader': 'Beéle',
+            'duration': 185
+        })
+        mem.add(collab, heard=True)
+        hit = mem.find(solo)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.reason, 'exact')
+
+    def test_band_with_comma_stays_intact(self):
+        # Task 15: Earth, Wind & Fire uploaded by "Earth Wind & Fire" (the
+        # band guard). The channel name equals the whole left side, so it
+        # must not be split at the comma.
+        song = songs.attribute({
+            'id': 'ewf_id',
+            'title': 'Earth, Wind & Fire - September',
+            'uploader': 'Earth Wind & Fire',
+            'duration': 215
+        })
+        self.assertEqual(song.artist, 'earth wind fire')
+
+    def test_band_with_ampersand_never_splits(self):
+        # Task 15: Kool & The Gang - all four '&' cases in the real corpus
+        # are band names, not collabs, so '&' is never a split point.
+        song = songs.attribute({
+            'id': 'kool_id',
+            'title': 'Kool & The Gang - Celebration',
+            'uploader': 'Kool & The Gang',
+            'duration': 220
+        })
+        self.assertEqual(song.artist, 'kool the gang')
+
+    def test_collab_first_artist_is_independent_of_uploader(self):
+        # Task 15: "Rema, Selena Gomez" yields 'rema' whether the uploader
+        # is Rema, Selena Gomez, or a third-party lyrics channel. The first
+        # credit is canonical, not the channel-matching one.
+        rema_upload = songs.attribute({
+            'id': 'v1',
+            'title': 'Rema, Selena Gomez - Calm Down',
+            'uploader': 'Rema',
+            'duration': 239
+        })
+        selena_upload = songs.attribute({
+            'id': 'v2',
+            'title': 'Rema, Selena Gomez - Calm Down',
+            'uploader': 'Selena Gomez',
+            'duration': 239
+        })
+        self.assertEqual(rema_upload.artist, 'rema')
+        self.assertEqual(selena_upload.artist, 'rema')
+
 
 class TestTokens(unittest.TestCase):
     def test_featured_artists_are_dropped(self):

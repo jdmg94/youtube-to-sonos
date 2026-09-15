@@ -121,6 +121,30 @@ def version_rank(title, channel):
     return 2
 
 
+def _first_artist(left_stripped, channel_folded):
+    """Collapse collaboration credits to the first artist.
+
+    Splits on comma and ' x '/' X ' only (never '&', which appears only in
+    band names in the real corpus: Chino & Nacho, Earth Wind & Fire, etc).
+    Band guard: if the channel name equals the whole left side, it's one
+    artist's name and must not be split.
+    """
+    left_folded = _fold(left_stripped)
+    # Band guard: channel matches the whole left side (after folding both)
+    if channel_folded and left_folded == channel_folded:
+        return left_folded  # It's a band name, keep it whole
+
+    # Split on comma or ' x '/' X ' (case-insensitive)
+    # Never split on '&' - all four occurrences in corpus are band names
+    parts = re.split(r',\s*|\s+x\s+', left_stripped, flags=re.IGNORECASE)
+    if parts and len(parts) > 1:
+        # Take first credit and fold it
+        return _fold(parts[0])
+
+    # No split happened, return the folded whole thing
+    return left_folded
+
+
 def _split_title(title, channel_folded):
     """(artist, song-side) from a title, using the channel name as the tiebreak.
 
@@ -142,10 +166,11 @@ def _split_title(title, channel_folded):
             return channel_folded, left
         # Otherwise the left side. This is both the dominant convention and the
         # `Walker #57` case, where the channel is a stranger and the title is
-        # the only truth we have. Strip bracketed qualifiers so "[Official Video]
-        # Kapo" yields artist='kapo', not 'official video kapo'.
+        # the only truth we have. Strip bracketed qualifiers, then collapse
+        # collab credits to the first artist.
         left_stripped = _BRACKETS.sub(' ', left)
-        return _LEADING_THE.sub('', _fold(left_stripped)), right
+        artist = _first_artist(left_stripped, channel_folded)
+        return _LEADING_THE.sub('', artist), right
     return channel_folded, title or ''
 
 
