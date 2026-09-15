@@ -133,8 +133,12 @@ def _split_title(title, channel_folded):
     if len(parts) == 2:
         left, right = parts
         # "Let Her Go - Passenger" on channel Passenger: the artist is on the
-        # right. Only the channel can tell us that.
-        if channel_folded and _fold(right) == channel_folded:
+        # right. Only the channel can tell us that. Strip bracketed qualifiers
+        # and featured artists before comparing, so "UWAIE - Kapo (Video Oficial)"
+        # on channel Kapo still reverses.
+        right_stripped = _BRACKETS.sub(' ', right)
+        right_stripped = _FEAT.sub(' ', right_stripped)
+        if channel_folded and _fold(right_stripped) == channel_folded:
             return channel_folded, left
         # Otherwise the left side. This is both the dominant convention and the
         # `Walker #57` case, where the channel is a stranger and the title is

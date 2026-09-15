@@ -41,6 +41,41 @@ class TestArtist(unittest.TestCase):
         self.assertEqual(song.artist, 'passenger')
         self.assertEqual(song.tokens, frozenset({'let', 'her', 'go'}))
 
+    def test_reversed_order_with_bracketed_qualifier_matches_channel(self):
+        # Task 14: "UWAIE - Kapo (Video Oficial)" on channel Kapo. The qualifier
+        # used to block the channel match, leaving artist='uwaie', tokens={'kapo'}.
+        played = {
+            'id': 'played_id',
+            'title': 'Kapo - UWAIE (Lyrics/Letra)',
+            'uploader': 'TUFF Music',
+            'duration': 185
+        }
+        queued = {
+            'id': 'queued_id',
+            'title': 'UWAIE - Kapo (Video Oficial)',
+            'uploader': 'Kapo',
+            'duration': 192
+        }
+        played_song = songs.attribute(played)
+        queued_song = songs.attribute(queued)
+        # Both should resolve to the same artist and tokens
+        self.assertEqual(played_song.artist, 'kapo')
+        self.assertEqual(queued_song.artist, 'kapo')
+        self.assertEqual(played_song.tokens, frozenset({'uwaie'}))
+        self.assertEqual(queued_song.tokens, frozenset({'uwaie'}))
+
+    def test_reversed_order_with_featured_artist_matches_channel(self):
+        # Task 14 extension: "UWAIE - Kapo feat. Someone" on channel Kapo
+        # should also reverse, proving _FEAT is stripped before comparison.
+        song = songs.attribute({
+            'id': 'feat_id',
+            'title': 'UWAIE - Kapo feat. Someone',
+            'uploader': 'Kapo',
+            'duration': 192
+        })
+        self.assertEqual(song.artist, 'kapo')
+        self.assertEqual(song.tokens, frozenset({'uwaie'}))
+
     def test_a_stranger_reuploading_is_attributed_to_the_performer(self):
         # `Walker #57` uploading Ellie Goulding. Today's channel_id-first key
         # files this under Walker #57, so it escapes the cap entirely.
@@ -296,6 +331,29 @@ class TestMemoryBookkeeping(unittest.TestCase):
         other = songs.SongMemory()
         other.add(songs.attribute(SYN['syn_topic']))
         self.assertIsNotNone(other.find(mem.entries()[0].as_song()))
+
+    def test_reversed_title_with_qualifier_is_matched_in_memory(self):
+        # Task 14: memory-level regression. The two Kapo/UWAIE uploads must
+        # match despite reversed title order and bracketed qualifiers, and
+        # they must match even with different durations (proving the match
+        # does not lean on duration corroboration).
+        mem = songs.SongMemory()
+        played = {
+            'id': 'played_id',
+            'title': 'Kapo - UWAIE (Lyrics/Letra)',
+            'uploader': 'TUFF Music',
+            'duration': 185
+        }
+        queued = {
+            'id': 'queued_id',
+            'title': 'UWAIE - Kapo (Video Oficial)',
+            'uploader': 'Kapo',
+            'duration': 192
+        }
+        mem.add(songs.attribute(played), heard=True)
+        hit = mem.find(songs.attribute(queued))
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.reason, 'exact')
 
 
 class TestHeardAndExpiry(unittest.TestCase):
