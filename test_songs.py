@@ -203,6 +203,79 @@ class TestArtist(unittest.TestCase):
         self.assertEqual(rema_upload.artist, 'rema')
         self.assertEqual(selena_upload.artist, 'rema')
 
+    def test_ampersand_band_under_third_party_stays_whole(self):
+        # Task 16: "Earth, Wind & Fire" under a third-party channel yields
+        # 'earth wind fire', not 'earth'. The '&' signal is uploader-independent.
+        third_party = songs.attribute({
+            'id': 'third_id',
+            'title': 'Earth, Wind & Fire - September',
+            'uploader': 'Random Lyrics Channel',
+            'duration': 215
+        })
+        self.assertEqual(third_party.artist, 'earth wind fire')
+
+    def test_ampersand_band_uploader_independence(self):
+        # Task 16: same title under own channel and third-party channel yields
+        # the same artist value (uploader independence).
+        own_channel = songs.attribute({
+            'id': 'own_id',
+            'title': 'Earth, Wind & Fire - September',
+            'uploader': 'Earth Wind & Fire',
+            'duration': 215
+        })
+        third_party = songs.attribute({
+            'id': 'third_id',
+            'title': 'Earth, Wind & Fire - September',
+            'uploader': 'Random Lyrics Channel',
+            'duration': 215
+        })
+        self.assertEqual(own_channel.artist, third_party.artist)
+        self.assertEqual(own_channel.artist, 'earth wind fire')
+
+    def test_ampersand_band_third_party_dedupes_in_memory(self):
+        # Task 16: memory-level test. add() own-channel upload, find() third-party
+        # upload -> hit.
+        mem = songs.SongMemory()
+        own_channel = songs.attribute({
+            'id': 'own_id',
+            'title': 'Earth, Wind & Fire - September',
+            'uploader': 'Earth Wind & Fire',
+            'duration': 215
+        })
+        third_party = songs.attribute({
+            'id': 'third_id',
+            'title': 'Earth, Wind & Fire - September',
+            'uploader': 'Random Lyrics Channel',
+            'duration': 215
+        })
+        mem.add(own_channel, heard=True)
+        hit = mem.find(third_party)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit.reason, 'exact')
+
+    def test_ampersand_band_without_comma_stays_whole(self):
+        # Task 16: "Kool & The Gang" under a stranger channel stays whole.
+        # Guards the '&' rule without the channel guard.
+        stranger = songs.attribute({
+            'id': 'stranger_id',
+            'title': 'Kool & The Gang - Celebration',
+            'uploader': 'Some Uploader',
+            'duration': 220
+        })
+        self.assertEqual(stranger.artist, 'kool the gang')
+
+    def test_genuine_collab_still_splits(self):
+        # Task 16: a genuine comma collab still collapses to its first artist.
+        # Guards against over-reaching: do not let the '&' rule disable comma
+        # splitting generally.
+        collab = songs.attribute({
+            'id': 'collab_id',
+            'title': 'Lady Gaga, Bruno Mars - Die With A Smile',
+            'uploader': 'Lady Gaga',
+            'duration': 261
+        })
+        self.assertEqual(collab.artist, 'lady gaga')
+
 
 class TestTokens(unittest.TestCase):
     def test_featured_artists_are_dropped(self):

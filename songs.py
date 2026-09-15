@@ -126,10 +126,15 @@ def _first_artist(left_stripped, channel_folded):
 
     Splits on comma and ' x '/' X ' only (never '&', which appears only in
     band names in the real corpus: Chino & Nacho, Earth Wind & Fire, etc).
-    Band guard: if the channel name equals the whole left side, it's one
-    artist's name and must not be split.
+    Band guards (uploader-independent): if the left side contains '&', it's
+    a band name; if the channel name equals the whole left side, it's also
+    one artist's name. Either way, keep it whole and don't split.
     """
     left_folded = _fold(left_stripped)
+    # Band guard 1: '&' means band name (uploader-independent)
+    # Every '&' in the corpus is a band; no genuine collab contains '&'.
+    if '&' in left_stripped:
+        return left_folded  # It's a band name, keep it whole
     # Band guard: channel matches the whole left side (after folding both)
     if channel_folded and left_folded == channel_folded:
         return left_folded  # It's a band name, keep it whole
