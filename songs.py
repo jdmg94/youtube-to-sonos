@@ -142,8 +142,10 @@ def _split_title(title, channel_folded):
             return channel_folded, left
         # Otherwise the left side. This is both the dominant convention and the
         # `Walker #57` case, where the channel is a stranger and the title is
-        # the only truth we have.
-        return _LEADING_THE.sub('', _fold(left)), right
+        # the only truth we have. Strip bracketed qualifiers so "[Official Video]
+        # Kapo" yields artist='kapo', not 'official video kapo'.
+        left_stripped = _BRACKETS.sub(' ', left)
+        return _LEADING_THE.sub('', _fold(left_stripped)), right
     return channel_folded, title or ''
 
 

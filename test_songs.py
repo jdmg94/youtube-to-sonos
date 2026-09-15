@@ -76,6 +76,18 @@ class TestArtist(unittest.TestCase):
         self.assertEqual(song.artist, 'kapo')
         self.assertEqual(song.tokens, frozenset({'uwaie'}))
 
+    def test_leading_brackets_stripped_from_left_side(self):
+        # Task 14 commit 2: "[Official Video] Kapo - UWAIE" should yield
+        # artist='kapo', not artist='official video kapo'.
+        song = songs.attribute({
+            'id': 'bracket_id',
+            'title': '[Official Video] Kapo - UWAIE',
+            'uploader': 'Kapo',
+            'duration': 192
+        })
+        self.assertEqual(song.artist, 'kapo')
+        self.assertEqual(song.tokens, frozenset({'uwaie'}))
+
     def test_a_stranger_reuploading_is_attributed_to_the_performer(self):
         # `Walker #57` uploading Ellie Goulding. Today's channel_id-first key
         # files this under Walker #57, so it escapes the cap entirely.
