@@ -1,15 +1,16 @@
 "use client";
 
-import { Loader2, SkipBack, SkipForward, Square } from "lucide-react";
+import { Loader2, Music, SkipBack, SkipForward, Square } from "lucide-react";
 import { toast } from "sonner";
 
 import { Equalizer } from "@/components/equalizer";
 import { api } from "@/lib/api/client";
 import type { Device, NowPlaying, StationBody } from "@/lib/api/types";
 import { useAction } from "@/lib/hooks/use-action";
+import { useClipped } from "@/lib/hooks/use-clipped";
 import { useErrorToast } from "@/lib/hooks/use-error-toast";
 import { useTrackChange } from "@/lib/hooks/use-track-change";
-import { canGoNext, canGoPrevious, describeNowPlaying } from "@/lib/now-playing";
+import { canGoNext, canGoPrevious, describeNowPlaying, trackArtwork } from "@/lib/now-playing";
 import { cn } from "@/lib/utils";
 
 export interface NowPlayingCardProps {
@@ -48,9 +49,17 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
   const view = describeNowPlaying(nowPlaying, device?.name ?? null);
   useTrackChange(view.mode, view.title, (title) => toast(`Now playing: ${title}`));
 
+  /*
+   * Keyed on the title, because that is the only thing that changes the answer:
+   * the element itself survives every track change, so a measurement taken on
+   * mount would describe whichever song was playing when the card appeared.
+   */
+  const [titleRef, titleClipped] = useClipped<HTMLSpanElement>(view.title);
+
   if (!device) return null;
 
   const live = view.mode === "playing";
+  const artwork = trackArtwork(station, view.mode);
 
   return (
     <div
@@ -60,6 +69,19 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
         live ? "border-ok/15 bg-ok/[0.05]" : "border-border bg-white/[0.04]",
       )}
     >
+      {/*
+       * The cover, and only while there is something to cover. `trackArtwork`
+       * already returns null when idle; this drops the whole box rather than
+       * rendering an empty one, because a 169px placeholder above "—" is a
+       * bigger claim that something is loading than the em dash is that nothing
+       * is.
+       *
+       * Between those two states is the one that matters: engaged with no URL
+       * yet. That renders the placeholder at the same height, so the card does
+       * not jump by a fifth of its size the moment the station frame lands.
+       */}
+      {view.mode !== "idle" && <Artwork src={artwork} />}
+
       <div className="flex min-w-0 items-center gap-[0.85rem]">
         <span
           className={cn(
@@ -74,9 +96,19 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
           <span className="text-[0.72rem] font-bold uppercase tracking-[0.06em] text-muted-foreground">
             {view.label}
           </span>
-          {/* `title` so a track whose name is wider than a phone can still be
-              read, since there is nowhere to expand to. */}
-          <span className="truncate text-base font-semibold" title={view.title}>
+          {/*
+           * `title` only when the name is genuinely cut off — a desktop
+           * affordance, and only ever that: a native tooltip needs a hover, and
+           * a touch screen has none to give. Setting it unconditionally (as
+           * this did, justified by phones it never helped) puts a redundant OS
+           * tooltip over the artwork a second after the pointer stops on any
+           * title short enough to read in full.
+           */}
+          <span
+            ref={titleRef}
+            className="truncate text-base font-semibold"
+            title={titleClipped ? view.title : undefined}
+          >
             {view.title}
           </span>
         </span>
@@ -114,6 +146,54 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
           onClick={() => transport.run("next")}
         />
       </div>
+    </div>
+  );
+}
+
+/**
+ * The cover, sized 16:9 whatever shape the file is.
+ *
+ * YouTube's thumbnail is a 16:9 video still for most of the catalogue and a
+ * square cover for anything sourced from YouTube Music, and the box cannot
+ * change shape between songs without the whole card resizing under the
+ * listener's cursor. Cropping the square to fit would cut the top and bottom
+ * off the one artwork that is actually album art — so the image is drawn
+ * twice: a blurred, over-scaled copy underneath to fill the frame, and the
+ * real one `object-contain` on top, never cropped. A 16:9 source covers the
+ * backdrop exactly and pays only for a second decode of an image the browser
+ * already has cached. `scale-125` is what keeps `blur-2xl`'s 40px radius from
+ * fading the edges of the backdrop into the panel.
+ *
+ * Plain `<img>` rather than `next/image` for the same two reasons the queue
+ * rows and the player bar give: these URLs come from CDN hosts that rotate, so
+ * every one would have to be listed in `remotePatterns`, and the optimiser
+ * would proxy them through the Next server for a browser that can already
+ * reach YouTube directly.
+ *
+ * `alt=""` and not the track title: the title is its own line immediately
+ * below, and a screen reader announcing it twice describes a card that does
+ * not exist.
+ */
+function Artwork({ src }: { src: string | null }) {
+  return (
+    <div className="relative aspect-video w-full overflow-hidden rounded-lg bg-white/[0.05]">
+      {src ? (
+        <>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={src}
+            alt=""
+            aria-hidden
+            className="absolute inset-0 size-full scale-125 object-cover blur-2xl"
+          />
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={src} alt="" className="relative size-full object-contain" />
+        </>
+      ) : (
+        <span className="flex size-full items-center justify-center text-muted-foreground">
+          <Music aria-hidden className="size-7" />
+        </span>
+      )}
     </div>
   );
 }

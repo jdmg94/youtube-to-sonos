@@ -236,7 +236,7 @@ export interface StationRemoveResponse extends Station {
   status: "removed";
   /** The video id that went. */
   removed: string;
-  /** Its title, for the toast. `null` for a track yt-dlp could not name. */
+  /** Its title. `null` for a track yt-dlp could not name. */
   title: string | null;
   device: string;
 }

@@ -14,17 +14,22 @@ import { describe, it } from "node:test";
 
 import type { CacheState, StationBody, StationTrack } from "@/lib/api/types";
 import {
+  EXHAUSTED,
   NO_TRACKS,
   UNKNOWN_UPLOADER,
   UNTITLED,
   canRefresh,
+  describeExhausted,
   describeJump,
   describeQueue,
   describeRefresh,
   describeRemove,
-  describeRemoved,
+  indexOfTrack,
+  pendingStation,
   rowStatus,
+  splitQueue,
   trackStatus,
+  type QueueRow,
 } from "@/lib/queue";
 
 function track(overrides: Partial<StationTrack> = {}): StationTrack {
@@ -266,6 +271,77 @@ describe("describeQueue", () => {
   });
 });
 
+describe("splitQueue", () => {
+  function ids(rows: QueueRow[]): string[] {
+    return rows.map((row) => row.id);
+  }
+
+  it("puts the playing track at the head of what is upcoming", () => {
+    // The whole point of the split: the listener looks at the top of the panel
+    // and sees what is on and what is next, however long the session has run.
+    const rows = describeQueue(
+      station({
+        index: 2,
+        tracks: [track({ id: "a" }), track({ id: "b" }), track({ id: "c" }), track({ id: "d" })],
+      }),
+    );
+    const { upcoming } = splitQueue(rows);
+    assert.deepEqual(ids(upcoming), ["c", "d"]);
+    assert.equal(upcoming[0].active, true);
+  });
+
+  it("keeps upcoming tracks in the order they will play", () => {
+    // Not reversed. Reversing this half is what makes "what's next" read
+    // bottom-to-top, which is the arrangement this change exists to avoid.
+    const rows = describeQueue(
+      station({
+        index: 0,
+        tracks: [track({ id: "a" }), track({ id: "b" }), track({ id: "c" })],
+      }),
+    );
+    assert.deepEqual(ids(splitQueue(rows).upcoming), ["a", "b", "c"]);
+  });
+
+  it("hands back played tracks most-recent first", () => {
+    const rows = describeQueue(
+      station({
+        index: 3,
+        tracks: [track({ id: "a" }), track({ id: "b" }), track({ id: "c" }), track({ id: "d" })],
+      }),
+    );
+    assert.deepEqual(ids(splitQueue(rows).played), ["c", "b", "a"]);
+  });
+
+  it("leaves the rows themselves untouched", () => {
+    // Order is the only thing this decides. The index each row carries is a
+    // position in the station list and must survive being moved on screen —
+    // it is still what a jump would be addressed by.
+    const rows = describeQueue(
+      station({ index: 1, tracks: [track({ id: "a" }), track({ id: "b" })] }),
+    );
+    const { upcoming, played } = splitQueue(rows);
+    assert.equal(played[0].index, 0);
+    assert.equal(upcoming[0].index, 1);
+  });
+
+  it("treats the whole list as played when the cursor has run past it", () => {
+    // Same frame `describeQueue` marks no row active on: a refresh can shrink
+    // `tracks` under a cursor that has not moved yet. Nothing is upcoming, and
+    // guessing one of these rows is would put a jump target on screen that the
+    // speaker is not on.
+    const rows = describeQueue(
+      station({ index: 5, tracks: [track({ id: "a" }), track({ id: "b" })] }),
+    );
+    const { upcoming, played } = splitQueue(rows);
+    assert.deepEqual(ids(upcoming), []);
+    assert.deepEqual(ids(played), ["b", "a"]);
+  });
+
+  it("answers with two empty halves for an empty list", () => {
+    assert.deepEqual(splitQueue([]), { upcoming: [], played: [] });
+  });
+});
+
 describe("describeRemove", () => {
   it("sends the index and the id together", () => {
     // Both, always: the index alone is a position in a list the server may
@@ -314,18 +390,90 @@ describe("describeRemove", () => {
   });
 });
 
-describe("describeRemoved", () => {
-  it("names the track that went", () => {
-    // The row is gone by the time this is read, so the toast is the only thing
-    // that can confirm which one — the whole point of naming it.
-    assert.equal(describeRemoved("Rocket Man"), "Removed Rocket Man");
+/*
+ * The two functions that let a removal be optimistic. Between the click and
+ * the frame that confirms it, the panel's list and the server's list disagree
+ * by exactly the tracks that have been dropped — `pendingStation` is that
+ * subtraction, and everything downstream reads the result instead of the raw
+ * frame so that the rows, the jump index and the remove index all shift
+ * together. Getting this wrong is the silent kind: an index one too high
+ * removes or plays the *next* song.
+ */
+describe("pendingStation", () => {
+  it("hands back the frame untouched when nothing has been dropped", () => {
+    // Identity, not a copy: this runs on every render, and a fresh object each
+    // time would invalidate every memo downstream of it.
+    const list = station({ tracks: [track({ id: "a" }), track({ id: "b" })] });
+    assert.equal(pendingStation(list, new Set()), list);
   });
 
-  it("falls back to a name for a track the backend could not name", () => {
-    // The backend sends `title: null` straight from the station meta, and
-    // "Removed null" is what the plain interpolation gives.
-    assert.equal(describeRemoved(null), `Removed ${UNTITLED}`);
-    assert.equal(describeRemoved(""), `Removed ${UNTITLED}`);
+  it("drops the tracks it is given and renumbers what follows", () => {
+    const list = station({
+      index: 0,
+      tracks: [track({ id: "a" }), track({ id: "b" }), track({ id: "c" }), track({ id: "d" })],
+    });
+    const view = pendingStation(list, new Set(["b"]));
+    assert.deepEqual(view?.tracks.map((t) => t.id), ["a", "c", "d"]);
+    // The point of the whole exercise: `c` is index 2 in the frame and index 1
+    // here, and index 1 is what the server now calls it.
+    assert.equal(indexOfTrack(view, "c"), 1);
+  });
+
+  it("leaves the cursor on the same track", () => {
+    // Removals are only ever offered past the cursor, so the playing track
+    // keeps its position — and `active` keeps pointing at it.
+    const list = station({
+      index: 1,
+      tracks: [track({ id: "a" }), track({ id: "b" }), track({ id: "c" }), track({ id: "d" })],
+    });
+    const view = pendingStation(list, new Set(["c"]));
+    assert.equal(view?.tracks[view.index].id, "b");
+  });
+
+  it("keeps the cursor on its track even if one behind it goes", () => {
+    // Not reachable through the UI — the server refuses it and so does
+    // `describeRemove`. Asserted anyway because the alternative is the cursor
+    // silently landing on the wrong row, and the fix is one subtraction.
+    const list = station({
+      index: 2,
+      tracks: [track({ id: "a" }), track({ id: "b" }), track({ id: "c" })],
+    });
+    const view = pendingStation(list, new Set(["a"]));
+    assert.equal(view?.tracks[view.index].id, "c");
+  });
+
+  it("ignores ids the frame no longer lists", () => {
+    // The normal steady state for a beat: the removal succeeded, the frame
+    // confirming it has arrived, and the id has not been reaped yet.
+    const list = station({ tracks: [track({ id: "a" })] });
+    const view = pendingStation(list, new Set(["gone"]));
+    assert.deepEqual(view?.tracks.map((t) => t.id), ["a"]);
+  });
+
+  it("has nothing to subtract from before the first frame", () => {
+    assert.equal(pendingStation(null, new Set(["a"])), null);
+    assert.equal(pendingStation(undefined, new Set()), null);
+  });
+});
+
+describe("indexOfTrack", () => {
+  it("finds a track by the id its row was drawn with", () => {
+    const list = station({ tracks: [track({ id: "a" }), track({ id: "b" })] });
+    assert.equal(indexOfTrack(list, "b"), 1);
+  });
+
+  it("answers -1 for a track that has since gone", () => {
+    // Fed straight to `describeJump` / `describeRemove`, both of which read
+    // -1 as "no longer queued" rather than as the last element.
+    const list = station({ tracks: [track({ id: "a" })] });
+    assert.equal(indexOfTrack(list, "b"), -1);
+    assert.equal(describeJump(list, indexOfTrack(list, "b")).ok, false);
+    assert.equal(describeRemove(list, indexOfTrack(list, "b")).ok, false);
+  });
+
+  it("answers -1 with no station", () => {
+    assert.equal(indexOfTrack(null, "a"), -1);
+    assert.equal(indexOfTrack(undefined, "a"), -1);
   });
 });
 
@@ -439,5 +587,26 @@ describe("the words the user actually reads", () => {
     // An empty station is the normal state before the first play, not a
     // failure to load.
     assert.equal(NO_TRACKS, "No tracks queued yet");
+  });
+});
+
+describe("describeExhausted", () => {
+  it("returns null for a healthy station", () => {
+    const result = describeExhausted(station({ exhausted: false }));
+    assert.equal(result, null);
+  });
+
+  it("returns null for no station", () => {
+    // The panel renders before the first SSE frame, so both null and
+    // undefined must be handled.
+    assert.equal(describeExhausted(null), null);
+    assert.equal(describeExhausted(undefined), null);
+  });
+
+  it("explains a repeating station", () => {
+    // Assert on the exported constant, not on a literal, so the copy can
+    // change without touching the test.
+    const result = describeExhausted(station({ exhausted: true }));
+    assert.equal(result, EXHAUSTED);
   });
 });

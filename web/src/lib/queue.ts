@@ -20,6 +20,10 @@ export const UNTITLED = "Untitled";
 /** A track with no channel. Not "Unknown" — every one of these is from YouTube. */
 export const UNKNOWN_UPLOADER = "YouTube";
 
+/** Shown when the station has run out of new songs and is replaying old ones. */
+export const EXHAUSTED =
+  "Out of new songs for this station — replaying ones you've heard, oldest first.";
+
 /**
  * A track's download state, reduced to what the row actually distinguishes.
  *
@@ -149,6 +153,99 @@ function describeRow(track: StationTrack, index: number, cursor: number): QueueR
   };
 }
 
+/** The two halves of the panel, each in the order it should be drawn. */
+export interface QueueSections {
+  /** The playing track, then what follows it, in the order it will play. */
+  upcoming: QueueRow[];
+  /** What has already played, most recent first. */
+  played: QueueRow[];
+}
+
+/**
+ * The station list cut at the cursor and re-ordered for reading.
+ *
+ * The station never trims what it has played, so in play order the history
+ * accumulates above the cursor and pushes the playing track — and everything
+ * the listener actually wants to see — steadily further down. Drawn this way
+ * the top of the panel is always "what's on, what's next", however long the
+ * session has run.
+ *
+ * Only `upcoming` keeps play order. Reversing it too would put the immediate
+ * next track at the bottom of its block and make the queue read upwards, which
+ * is the arrangement this is here to avoid; `played` is reversed because its
+ * useful end is the track that just finished, sitting against the divider.
+ *
+ * Order is the only thing decided here. The rows are the ones `describeQueue`
+ * produced, indices and all — those are positions in the *station* list, and a
+ * jump or a removal is addressed by id and resolved against that list at
+ * dispatch (see `indexOfTrack`), so moving a row on screen cannot desync it.
+ */
+export function splitQueue(rows: QueueRow[]): QueueSections {
+  const cursor = rows.findIndex((row) => row.active);
+  // No active row — the cursor has run past the list, which `describeQueue`
+  // already renders as "nothing is playing". Calling one of these upcoming
+  // would draw a playing track the speaker is not on.
+  if (cursor < 0) return { upcoming: [], played: [...rows].reverse() };
+  return { upcoming: rows.slice(cursor), played: rows.slice(0, cursor).reverse() };
+}
+
+/**
+ * The station as the panel should draw it: the last frame minus the tracks
+ * already dropped.
+ *
+ * A removal is optimistic — the row goes on click and the frame confirming it
+ * arrives seconds later — so for that gap the panel's list and the server's
+ * list differ by exactly `removed`. Subtracting them here, once, is what keeps
+ * the two halves of the panel honest: `describeQueue`, `describeJump` and
+ * `describeRemove` all read the result instead of the raw frame, so the hidden
+ * rows and the indices sent back to the server shift together. The alternative
+ * — filtering the rows and leaving the indices alone — is off by one for every
+ * track after a dropped one, which plays or deletes the *next* song without a
+ * word.
+ *
+ * Returns the frame itself when there is nothing to subtract. This runs on
+ * every render and a fresh object each time would invalidate everything
+ * memoised on it.
+ */
+export function pendingStation(
+  station: StationBody | null | undefined,
+  removed: ReadonlySet<string>,
+): StationBody | null {
+  if (!station) return null;
+  if (removed.size === 0) return station;
+
+  const tracks: StationTrack[] = [];
+  let cursor = station.index;
+  station.tracks.forEach((track, i) => {
+    if (!removed.has(track.id)) {
+      tracks.push(track);
+    } else if (i < station.index) {
+      // Unreachable through the UI — nothing behind the cursor is removable —
+      // but the cursor is an index into this list and a track vanishing ahead
+      // of it would otherwise slide it onto the wrong row.
+      cursor -= 1;
+    }
+  });
+  return { ...station, index: cursor, tracks };
+}
+
+/**
+ * Where a track is now, addressed by the id its row was drawn with.
+ *
+ * Every write is sent by id and resolved to an index at the moment it is
+ * dispatched, never by the index the row was rendered with: a frame can land
+ * between the click and the request, and a removal renumbers everything after
+ * it. `-1` for a track that has gone, which `describeJump` and `describeRemove`
+ * both read as "no longer queued" rather than as the last element.
+ */
+export function indexOfTrack(
+  station: StationBody | null | undefined,
+  id: string,
+): number {
+  if (!station) return -1;
+  return station.tracks.findIndex((track) => track.id === id);
+}
+
 export type JumpDecision =
   | { ok: true; index: number }
   | { ok: false; message: string };
@@ -224,19 +321,19 @@ export type RemoveDecision =
   | { ok: false; message: string };
 
 /**
- * What a click on row `index`'s remove button should send.
+ * What a removal at `index` should send.
  *
  * The id travels with the index and is not redundant. The index is a position
- * in *this* render's list, and the station is replaced wholesale on every SSE
- * frame — a play-next insert landing in between renumbers everything after it,
- * so by the time the request arrives the index can name a different song. The
- * server checks the pair and refuses on a mismatch, which turns "the wrong
- * track silently disappeared" into "try again".
+ * in a list the server may have changed since — a play-next insert renumbers
+ * everything after it — so by the time the request arrives it can name a
+ * different song. The server checks the pair and refuses on a mismatch, which
+ * turns "the wrong track silently disappeared" into "try again".
  *
- * The refusals here are the same guards the server applies, evaluated early so
- * a stale click costs no round trip. They should be unreachable from a
- * rendered button — `removable` gates it on exactly this condition, and a test
- * pins the two together.
+ * Called with an index resolved from the row's id at dispatch (see
+ * `indexOfTrack`), not with the index the row was rendered with. Both refusals
+ * below are therefore reachable even though `removable` gates the button on
+ * exactly the second one: the frame can move, and the speaker can advance onto
+ * a track while its removal sits in the write queue.
  */
 export function describeRemove(
   station: StationBody | null | undefined,
@@ -253,12 +350,16 @@ export function describeRemove(
 }
 
 /**
- * The toast after a removal.
+ * The banner for a station that has started repeating itself, or null.
  *
- * Names the track, because by the time this is read the row is gone and the
- * toast is the only thing left that can confirm which one went — the failure
- * mode being a mis-tap on a list that just re-rendered.
+ * `exhausted` no longer means the queue stopped — with the oldest-first floor
+ * the station always has something to play — so this is an explanation, not an
+ * error. Returning null for the normal case keeps the caller a single
+ * conditional render rather than a string comparison.
  */
-export function describeRemoved(title: string | null | undefined): string {
-  return `Removed ${title || UNTITLED}`;
+export function describeExhausted(
+  station: StationBody | null | undefined,
+): string | null {
+  return station?.exhausted ? EXHAUSTED : null;
 }
+

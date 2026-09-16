@@ -1,6 +1,6 @@
 "use client";
 
-import { AudioLines, Lightbulb, ListMusic } from "lucide-react";
+import { ListMusic, SlidersHorizontal } from "lucide-react";
 
 import { TABS, TAB_LABEL, type AppTab } from "@/lib/shell";
 import { cn } from "@/lib/utils";
@@ -12,12 +12,20 @@ import { cn } from "@/lib/utils";
  * A `tablist` rather than a nav of links: these switch which panels are visible
  * on a single-page client app, they do not change the URL, and calling them
  * links would promise a back button that does not exist.
+ *
+ * Two tabs, and both of the sections that are not here are absent for their own
+ * reason. The player is a sheet reached from the row above this bar, because it
+ * is the one thing you want to reach *without* leaving what you were looking at
+ * — pausing a song should not close the queue you were reading. The lights are
+ * inside Settings, because picking an entertainment area and picking a speaker
+ * are the same kind of once-a-week decision. `PANEL_TAB` states both splits.
+ *
+ * `SlidersHorizontal` rather than the usual gear: this tab is two choices about
+ * *this room*, and a gear promises preferences, an account, a version number.
  */
-const TAB_ICON: Record<AppTab, typeof AudioLines> = {
-  // The equalizer motif the now-playing card already uses for "audible".
-  player: AudioLines,
+const TAB_ICON: Record<AppTab, typeof ListMusic> = {
   queue: ListMusic,
-  lights: Lightbulb,
+  settings: SlidersHorizontal,
 };
 
 export function TabBar({

@@ -14,7 +14,8 @@ import logging
 import heapq
 import random
 import itertools
-from collections import Counter
+import atexit
+from collections import Counter, OrderedDict
 from flask import Flask, jsonify, request, Response
 from werkzeug.exceptions import HTTPException
 import soco
@@ -23,6 +24,8 @@ from soco.data_structures import DidlMusicTrack, DidlResource
 import yt_dlp
 import hue
 import analysis
+import songs
+from songs import SongMemory, attribute, build_station_queue
 
 # Configure logging
 logging.basicConfig(
@@ -406,15 +409,24 @@ def _yt_error_response(err, context):
 #                           every time. A small pool keeps relevance (the
 #                           round-robin has already spread the artists) while
 #                           making two runs from one seed diverge.
-#   RECENT_MAX/RECENT_TTL — process-wide memory of tracks already served, so a
-#                           new station (or a refresh) doesn't re-suggest what
-#                           was just heard. Per-Station sets die with the
-#                           station; this is what outlives it.
 MAX_TRACKS_PER_ARTIST = int(os.environ.get('MAX_TRACKS_PER_ARTIST', 2))
 ARTIST_COOLDOWN = int(os.environ.get('ARTIST_COOLDOWN', 4))
 STATION_PICK_POOL = max(1, int(os.environ.get('STATION_PICK_POOL', 3)))
-RECENT_MAX = int(os.environ.get('RECENT_MAX', 300))
-RECENT_TTL = float(os.environ.get('RECENT_TTL', 12 * 3600))
+# How long a song stays "already heard", and how many are remembered. Seven
+# days is the span over which a listener notices a repeat; the cap is what
+# stops the file and the match cost growing without bound on a box that never
+# restarts. Songs merely *queued* expire much sooner — the station that queued
+# them may never reach them, and a track the speaker never played should not
+# be excluded tomorrow.
+HISTORY_TTL = float(os.environ.get('HISTORY_TTL', 7 * 86400))
+HISTORY_MAX = int(os.environ.get('HISTORY_MAX', 2000))
+HISTORY_QUEUED_TTL = float(os.environ.get('HISTORY_QUEUED_TTL', 2 * 3600))
+# How often the history is written to disk, at most.
+HISTORY_FLUSH_INTERVAL = float(os.environ.get('HISTORY_FLUSH_INTERVAL', 60))
+# How many songs a station remembers seeing but never queuing, for ladder
+# rung 3 — a seed pool that costs nothing to collect and is by construction
+# made of songs we have not played.
+SEEN_UNQUEUED_MAX = int(os.environ.get('SEEN_UNQUEUED_MAX', 300))
 
 # --- Local audio cache -------------------------------------------------------
 # Songs are downloaded and transcoded to disk ahead of playback, and Sonos pulls
@@ -469,6 +481,13 @@ MEDIA_START_TIMEOUT = float(os.environ.get('MEDIA_START_TIMEOUT', 120))
 # Radio mixes barely change minute to minute, so memoising them removes 1-2
 # YouTube round-trips per track boundary.
 MIX_CACHE_TTL = int(os.environ.get('MIX_CACHE_TTL', 3600))
+# How many entries to pull from a radio mix. 50 is measured: YouTube serves 50
+# unique tracks per mix and starts repeating past that, so 100 costs an extra
+# second of station-loop time for ~23 duplicates.
+MIX_LIMIT = int(os.environ.get('MIX_LIMIT', 50))
+# How many mixes to memoise. _MIX_CACHE is only bounded by how many distinct
+# seeds a process sees, which on a box that runs for weeks is unbounded.
+MIX_CACHE_MAX = int(os.environ.get('MIX_CACHE_MAX', 200))
 # Bytes a tail-served download must have on disk before we start responding, so
 # Sonos sees the ID3v2 header and a few frames rather than an empty body.
 TAIL_START_BYTES = int(os.environ.get('TAIL_START_BYTES', 65536))
@@ -482,13 +501,19 @@ PLAY_START_TIMEOUT = float(os.environ.get('PLAY_START_TIMEOUT', 45))
 PLAY_CONFIRM_TIMEOUT = float(os.environ.get('PLAY_CONFIRM_TIMEOUT', 6))
 PLAY_NUDGE_AFTER = float(os.environ.get('PLAY_NUDGE_AFTER', 1.5))
 
-# Guards STATION, _DOWNLOADS, _INUSE, _MIX_CACHE and _RECENT. Reentrant because
-# the station loop holds it while calling helpers that take it again.
+# Guards STATION, _DOWNLOADS, _INUSE, _MIX_CACHE and _HISTORY. Reentrant
+# because the station loop holds it while calling helpers that take it again.
 _STATE_LOCK = threading.RLock()
 _DOWNLOADS = {}          # video_id -> Download
 _INUSE = Counter()       # video_id -> active /media readers; blocks eviction
 _MIX_CACHE = {}          # video_id -> (fetched_at, entries)
-_RECENT = {}             # video_id -> (served_at, title_key)
+# Every song any station has queued or played, for HISTORY_TTL. Outlives the
+# Station objects — which is the whole point, since a stop-and-play used to
+# reset the memory to nothing — and survives a restart via history.json.
+_HISTORY = SongMemory(ttl=HISTORY_TTL, queued_ttl=HISTORY_QUEUED_TTL,
+                      max_songs=HISTORY_MAX)
+_HISTORY_PATH = os.path.join(CACHE_DIR, 'history.json')
+_HISTORY_FLUSHED_AT = 0.0
 
 # YouTube ids are 11 chars of [A-Za-z0-9_-], but keep the check loose and just
 # reject anything that could escape CACHE_DIR.
@@ -573,7 +598,22 @@ def extract_audio(video_id):
     logger.info(f"Resolved {video_id}: {desc} cookies={'yes' if COOKIES_FILE else 'NO'}")
     return direct_url, meta, headers
 
-def get_radio_mix(video_id, limit=25, refresh=False):
+def _prune_mix_cache():
+    """Drop expired mixes, then the oldest, until the cache fits.
+
+    Called under _STATE_LOCK, after an insert. Expiry first and eviction second
+    because an expired entry is worthless while the oldest live one may still
+    be a seed the station is walking — evicting purely by age would throw away
+    a useful mix while keeping stale ones.
+    """
+    now = time.time()
+    for vid in [v for v, (at, _) in _MIX_CACHE.items() if now - at >= MIX_CACHE_TTL]:
+        _MIX_CACHE.pop(vid, None)
+    while len(_MIX_CACHE) > MIX_CACHE_MAX:
+        oldest = min(_MIX_CACHE, key=lambda v: _MIX_CACHE[v][0])
+        _MIX_CACHE.pop(oldest, None)
+
+def get_radio_mix(video_id, limit=None, refresh=False):
     """Ordered list of track entries from YouTube's autoplay radio mix (RD<id>).
 
     This is YouTube's own 'up next' / autoplay sequence for a seed video. Each
@@ -585,6 +625,7 @@ def get_radio_mix(video_id, limit=25, refresh=False):
     mix for MIX_CACHE_TTL — so the one caller who explicitly wants a different
     set of songs (`refresh_station`) has to be able to bypass it.
     """
+    limit = MIX_LIMIT if limit is None else limit
     with _STATE_LOCK:
         cached = _MIX_CACHE.get(video_id)
         if not refresh and cached and time.time() - cached[0] < MIX_CACHE_TTL:
@@ -594,10 +635,19 @@ def get_radio_mix(video_id, limit=25, refresh=False):
     try:
         with yt_dlp.YoutubeDL(ydl_opts(extract_flat=True, playlistend=limit)) as ydl:
             info = ydl.extract_info(mix_url, download=False)
-        entries = [e for e in (info.get('entries') or []) if e.get('id')]
+        entries = []
+        seen = set()
+        for e in (info.get('entries') or []):
+            vid = e.get('id')
+            # YouTube repeats entries past ~50; two copies of one track would
+            # occupy two candidate slots and one artist-cap slot.
+            if vid and vid not in seen:
+                seen.add(vid)
+                entries.append(e)
         if entries:
             with _STATE_LOCK:
                 _MIX_CACHE[video_id] = (time.time(), entries)
+                _prune_mix_cache()
         return entries
     except Exception as e:
         if _is_bot_error(e):
@@ -605,68 +655,6 @@ def get_radio_mix(video_id, limit=25, refresh=False):
         else:
             logger.error(f"Failed to fetch radio mix for {video_id}: {e}")
         return []
-
-def _artist_key(entry):
-    """Stable identity for a track's artist, used to prevent one artist from
-    dominating the queue. Prefers the YouTube channel id (unique and reliable);
-    falls back to the normalized channel/uploader name, stripping the auto-
-    generated ' - Topic' suffix so 'Artist' and 'Artist - Topic' collapse."""
-    cid = entry.get('channel_id')
-    if cid:
-        return cid
-    name = (entry.get('uploader') or entry.get('channel') or '').strip()
-    name = re.sub(r'\s*[-–]\s*topic$', '', name, flags=re.IGNORECASE)
-    return name.casefold() or None
-
-def _title_key(title):
-    """Normalize a title so re-uploads of the same song collapse to one key
-    (e.g. '... (Official Video)' vs '... [4K Remaster]'). Artist stays in the
-    key so two different songs that share a name don't wrongly merge."""
-    t = (title or '').casefold()
-    t = re.sub(r'\[[^\]]*\]', ' ', t)   # [4K Remaster], [Lyrics], ...
-    t = re.sub(r'\([^)]*\)', ' ', t)    # (Official Video), (Audio), ...
-    t = re.sub(r'\b(official|video|audio|lyrics?|visualizer|hd|4k|remaster(?:ed)?|mv)\b', ' ', t)
-    t = re.sub(r'[^\w\s]', ' ', t)
-    t = re.sub(r'\s+', ' ', t).strip()
-    return t
-
-def _remember(video_id, title):
-    """Record a track as recently served, process-wide.
-
-    `Station.played_ids` dies with its station, so without this a stop-and-play
-    on the same seed rebuilds the identical queue: the radio mix is still cached
-    and nothing remembers that those tracks just played. Entries expire after
-    RECENT_TTL and the map is capped at RECENT_MAX, oldest first, so a station
-    left running for days can't starve itself of candidates.
-    """
-    if not video_id:
-        return
-    with _STATE_LOCK:
-        _RECENT[video_id] = (time.time(), _title_key(title))
-        if len(_RECENT) > RECENT_MAX:
-            cutoff = time.time() - RECENT_TTL
-            for vid, (served, _t) in list(_RECENT.items()):
-                if served < cutoff:
-                    del _RECENT[vid]
-            for vid in sorted(_RECENT, key=lambda v: _RECENT[v][0])[
-                    :max(0, len(_RECENT) - RECENT_MAX)]:
-                del _RECENT[vid]
-
-
-def _recent_filters():
-    """(ids, title_keys) of tracks served recently enough to skip. Prunes as it reads."""
-    cutoff = time.time() - RECENT_TTL
-    ids, titles = set(), set()
-    with _STATE_LOCK:
-        for vid, (served, tkey) in list(_RECENT.items()):
-            if served < cutoff:
-                del _RECENT[vid]
-                continue
-            ids.add(vid)
-            if tkey:
-                titles.add(tkey)
-    return ids, titles
-
 
 def _reseed_ids(played_order):
     """Pick which recently-played tracks to reseed the autoplay mix from.
@@ -684,51 +672,19 @@ def _reseed_ids(played_order):
         seeds.append(random.choice(window))
     return seeds
 
-def build_station_queue(seeds, played_ids, played_titles,
-                        cooldown_artists=(), max_per_artist=MAX_TRACKS_PER_ARTIST,
-                        refresh=False):
-    """Build a varied autoplay queue from one or more seed radio mixes.
 
-    Drops already-played tracks and re-uploads of already-played songs, caps how
-    many tracks any one artist contributes, then round-robins across artists so
-    no artist plays back-to-back. Artists heard recently (cooldown_artists) are
-    ordered last, so a fresh artist leads the refill. Returns a list of entries.
+def _log_reject(entry, reason):
+    """Report a candidate dropped by a fuzzy match.
+
+    Called by build_station_queue via on_reject, which already filters out id
+    matches (songs.py:567). An id match is the normal case and logging it would
+    bury the judgements — 'exact' (same token set, different upload), 'subset'
+    (one title contained in the other), 'overlap' (80% of tokens plus a duration
+    within 5s) — which are the rules that can be wrong.
     """
-    cooldown = set(a for a in cooldown_artists if a)
-
-    # 1. Gather candidates across all seed mixes, deduping by id and by song.
-    buckets = {}   # artist_key -> [entries], capped at max_per_artist
-    order = []     # artist_keys in first-seen (mix relevance) order
-    seen_ids = set()
-    seen_titles = set()
-    for seed in seeds:
-        for e in get_radio_mix(seed, refresh=refresh):
-            vid = e.get('id')
-            if not vid or vid in played_ids or vid in seen_ids:
-                continue
-            tkey = _title_key(e.get('title'))
-            if tkey and (tkey in played_titles or tkey in seen_titles):
-                continue
-            seen_ids.add(vid)
-            if tkey:
-                seen_titles.add(tkey)
-            akey = _artist_key(e) or vid  # unknown artist -> treat as unique
-            if akey not in buckets:
-                buckets[akey] = []
-                order.append(akey)
-            if len(buckets[akey]) < max_per_artist:
-                buckets[akey].append(e)
-
-    # 2. Fresh artists before cooled-down ones (stable sort preserves relevance).
-    order.sort(key=lambda a: a in cooldown)
-
-    # 3. Round-robin across artists -> interleaved, no back-to-back same artist.
-    queue = []
-    while any(buckets[a] for a in order):
-        for a in order:
-            if buckets[a]:
-                queue.append(buckets[a].pop(0))
-    return queue
+    logger.info(
+        f"Dedupe[{reason}] dropped {entry.get('id')} "
+        f"{entry.get('title')!r} by {entry.get('uploader') or entry.get('channel')!r}")
 
 # --- Download cache ----------------------------------------------------------
 
@@ -1498,10 +1454,16 @@ class Station:
         self.tracks = []
         self.enqueued = 0
         self.index = 0
-        self.played_ids = set()
-        self.played_titles = set()
-        self.played_order = []
-        self.artist_history = []
+        # Songs this station has queued, with no TTL and no cap: a session's
+        # own queue must never repeat itself however long it runs, which is a
+        # stronger rule than the 7-day one and needs its own set.
+        self.memory = SongMemory(ttl=None, queued_ttl=None, max_songs=None)
+        self.played_order = []       # video_ids in queue order, for reseeding
+        self.artist_history = []     # artist keys, most recent last
+        # Songs a mix offered that we did not queue — ladder rung 3's seed
+        # pool. An OrderedDict used as an ordered set, oldest first.
+        self.seen_unqueued = OrderedDict()
+        self.widen = 0               # ladder rung to try next; see _pick_next
         self.exhausted = False
         self.idle_polls = 0
         self.ticks = 0
@@ -1519,6 +1481,12 @@ class Station:
         renumbers every track after it in both `tracks` and the Sonos queue.
         """
         vid = entry.get('id') or entry.get('video_id')
+        song = attribute(entry)
+        self.memory.add(song)
+        with _STATE_LOCK:
+            _HISTORY.add(song)                 # heard=False: queued, not played
+        # A song we queued is no longer a song we passed over.
+        self.seen_unqueued.pop(vid, None)
         meta = {
             'video_id': vid,
             'title': entry.get('title'),
@@ -1531,53 +1499,190 @@ class Station:
             self.tracks.append(meta)
         else:
             self.tracks.insert(at, meta)
-        self.played_ids.add(vid)
         self.played_order.append(vid)
-        tkey = _title_key(meta['title'])
-        if tkey:
-            self.played_titles.add(tkey)
-        # Every track that ever enters a station passes through here, which
-        # makes this the one place the process-wide memory can be kept honest.
-        _remember(vid, meta['title'])
-        self.artist_history.append(_artist_key(entry) or vid)
+        self.artist_history.append(song.artist or vid)
         return meta
 
 
-def _pick_next(station, refresh=False):
-    """Next track for the station, excluding anything heard recently.
+def _choose(station, queue, entries):
+    """Take one from the top of the pool, and remember what we passed over.
 
-    Filters are applied as a ladder, loosest constraint dropped first, so a full
-    recent-memory can slow the station down but never stall it:
+    The pick is random within STATION_PICK_POOL because a deterministic pick
+    makes the whole walk reproducible — same seed, same mix, same queue, which
+    is defect 5 in the spec.
 
-      1. the station's own played sets *plus* the process-wide recent memory;
-      2. the station's sets alone (this station has still never repeated);
-      3. ids only, artist cap lifted — the last resort before 'exhausted'.
-
-    The result is drawn at random from the top STATION_PICK_POOL candidates
-    rather than always taking the best one: build_station_queue is deterministic,
-    so `queue[0]` walks an identical path every time a seed comes back around.
+    Everything else the pool offered is recorded as seen-but-unqueued, which
+    costs a dict insert and gives rung 3 a seed pool made entirely of songs
+    this station has not played.
     """
+    chosen = random.choice(queue[:STATION_PICK_POOL])
+    _record_unqueued(station, (e for e in queue if e is not chosen))
+    return chosen
+
+
+def _record_unqueued(station, entries):
+    for e in entries:
+        vid = e.get('id')
+        if not vid:
+            continue
+        station.seen_unqueued[vid] = None
+        station.seen_unqueued.move_to_end(vid)
+    while len(station.seen_unqueued) > SEEN_UNQUEUED_MAX:
+        station.seen_unqueued.popitem(last=False)
+
+
+def _widen_seed(station, rung, used):
+    """One more seed id for ladder rung `rung`, or None if there isn't one.
+
+    Rung 2 reaches further back into this station's own walk than _reseed_ids
+    does — _reseed_ids draws from the last 9 tracks (played_order[-1] plus one
+    from [-9:-1]), so [:-9] is the precise complement, everything _reseed_ids
+    cannot reach. A station that has been orbiting one sound for an hour is
+    reseeding from inside that orbit; an older track is a different
+    neighbourhood and it is one we know the listener accepted.
+
+    Rung 3 leaves the walk entirely: a song some mix offered that we never
+    queued. Its mix is by construction adjacent to this station's taste and by
+    construction not something we have played.
+    """
+    if rung == 2:
+        pool = [v for v in station.played_order[:-9] if v not in used]
+        return random.choice(pool) if pool else None
+    if rung == 3:
+        pool = [v for v in station.seen_unqueued if v not in used]
+        return random.choice(pool) if pool else None
+    return None
+
+
+def _cooldown_artists(station):
+    """Artists to push down the running order, most recent ARTIST_COOLDOWN.
+
+    Written as an explicit guard rather than a slice because
+    artist_history[-0:] is artist_history[0:] — the whole list — so a bare
+    slice turns ARTIST_COOLDOWN=0 into the maximum cooldown instead of none.
+    Negative values mean the same as zero.
+    """
+    if ARTIST_COOLDOWN <= 0:
+        return []
+    return station.artist_history[-ARTIST_COOLDOWN:]
+
+
+def _reserve_oldest(station):
+    """The floor: re-serve the song heard longest ago.
+
+    The old floor took whatever survived with every filter off, which is
+    mix-relevance order, which tracks popularity — so the first song a starved
+    station repeated was its most popular one, the one most likely to be
+    recognised as a repeat. Least-recently-heard is the opposite choice and
+    the only one that degrades gracefully.
+
+    Returns an entry shaped like a mix entry, because every caller downstream
+    (Station.add, _top_up, ensure_cached) expects that shape. The metadata
+    comes from the memory, enriched from station.tracks when that id is still
+    listed there — the memory keeps a title and an artist but not a thumbnail
+    or a duration the UI can show.
+    """
+    with _STATE_LOCK:
+        entry = _HISTORY.oldest_heard()
+    if entry is None:
+        station.exhausted = True
+        return None
+
+    vid = entry.best_id()
+    # station.tracks holds *meta* dicts keyed 'video_id' (Station.add builds
+    # them), not mix entries keyed 'id'. The return value has to be a mix entry,
+    # so this translates rather than copying.
+    for track in station.tracks:
+        if track.get('video_id') == vid:
+            out = {'id': vid, 'title': track.get('title'),
+                   'uploader': track.get('uploader'),
+                   'thumbnail': track.get('thumbnail'),
+                   'channel_id': track.get('channel_id'),
+                   'duration': track.get('duration')}
+            break
+    else:
+        out = {'id': vid, 'title': entry.title, 'uploader': entry.artist,
+               'duration': entry.duration}
+
+    station.exhausted = True
+    logger.info(
+        f"Station {station.device_ip}: exhausted, re-serving {entry.title!r} "
+        f"last heard {int(time.time() - entry.last_at)}s ago")
+    return out
+
+
+def _pick_next(station, refresh=False, fetch=None):
+    """The next track for this station, or None if there is genuinely nothing.
+
+    `fetch` is the mix fetcher, defaulting to get_radio_mix. Injected so the
+    walk simulation in Task 10 can drive the whole ladder from fixtures.
+
+    Returns None only when station.played_order is empty — with the oldest-
+    first floor at rung 6, a station with any history always has something to
+    play. Sets station.exhausted when it had to use that floor.
+    """
+    fetch = fetch or get_radio_mix
+    if not station.played_order:
+        return None
+
     seeds = _reseed_ids(station.played_order)
-    if not seeds:
-        return None
-    cooldown = station.artist_history[-ARTIST_COOLDOWN:]
-    recent_ids, recent_titles = _recent_filters()
-    queue = build_station_queue(seeds,
-                                station.played_ids | recent_ids,
-                                station.played_titles | recent_titles,
-                                cooldown_artists=cooldown, refresh=refresh)
-    if not queue:
-        queue = build_station_queue(seeds, station.played_ids,
-                                    station.played_titles,
-                                    cooldown_artists=cooldown)
-    if not queue:
-        # Nothing new under the artist cap — relax the cap and the title filter
-        # one last time before declaring the station exhausted.
-        queue = build_station_queue(seeds, station.played_ids, set(),
-                                    cooldown_artists=cooldown, max_per_artist=99)
-    if not queue:
-        return None
-    return random.choice(queue[:STATION_PICK_POOL])
+    cooldown = _cooldown_artists(station)
+    entries = []
+    for seed in seeds:
+        entries.extend(fetch(seed, refresh=refresh))
+
+    # Rung 1: the normal path, no extra fetch.
+    with _STATE_LOCK:
+        queue = build_station_queue(entries, [station.memory, _HISTORY],
+                                    cooldown_artists=cooldown,
+                                    max_per_artist=MAX_TRACKS_PER_ARTIST,
+                                    on_reject=_log_reject)
+    if queue:
+        # Back to normal: forget that we ever had to widen, so the next lean
+        # patch starts from one fetch again.
+        station.widen = 0
+        station.exhausted = False
+        return _choose(station, queue, entries)
+
+    # Rung 2 or 3 — whichever `station.widen` points at, and only ONE of them.
+    # Each is a synchronous yt-dlp extraction (~2.6s) inside the station loop,
+    # and the Global Constraint is at most one extra fetch per call. A station
+    # that needs both climbs on the next tick, which costs seconds, not the
+    # tens of seconds a loop over both rungs would cost every tick.
+    rung = 2 + min(station.widen, 1)
+    station.widen += 1          # 0→2, 1→3, then 3 until rung 1 resets
+    extra = _widen_seed(station, rung, seeds)
+    if extra:
+        entries.extend(fetch(extra, refresh=refresh))
+        with _STATE_LOCK:
+            queue = build_station_queue(entries, [station.memory, _HISTORY],
+                                        cooldown_artists=cooldown,
+                                        max_per_artist=MAX_TRACKS_PER_ARTIST,
+                                        on_reject=_log_reject)
+        if queue:
+            station.exhausted = False
+            return _choose(station, queue, entries)
+
+    # Rung 4: drop the 7-day memory. The station's own list still holds, so
+    # this repeats nothing within the session — only something from days ago.
+    queue = build_station_queue(entries, [station.memory],
+                                cooldown_artists=cooldown,
+                                max_per_artist=MAX_TRACKS_PER_ARTIST)
+    if queue:
+        station.exhausted = False
+        return _choose(station, queue, entries)
+
+    # Rung 5: lift the artist cap, keep the song filter. Two songs by one
+    # artist in a row is a much smaller harm than the same song twice.
+    queue = build_station_queue(entries, [station.memory],
+                                max_per_artist=len(entries) or 1)
+    if queue:
+        logger.info(f"Station {station.device_ip}: artist cap lifted to refill")
+        station.exhausted = False
+        return _choose(station, queue, entries)
+
+    # Rung 6: the floor.
+    return _reserve_oldest(station)
 
 
 def _prefetch_target(station):
@@ -1637,6 +1742,10 @@ def _top_up(station, refresh=False):
     refetch is enough to replace the memoised mix that every later pick then
     reads, and asking again per pick would just spend round trips on data we
     already refreshed a moment ago.
+
+    `station.exhausted` is owned by `_pick_next` and reflects whether the last
+    pick came from the repeat floor (rung 6), not whether the station stopped.
+    This function must preserve whatever value `_pick_next` set.
     """
     target = _prefetch_target(station)
     added = 0
@@ -1649,7 +1758,6 @@ def _top_up(station, refresh=False):
                             f"{len(station.tracks)} track(s) queued")
                 station.exhausted = True
             return
-        station.exhausted = False
         meta = station.add(entry)
         added += 1
         try:
@@ -1729,6 +1837,66 @@ def _evict(station):
                     f"-{WINDOW_BEHIND}/+{WINDOW_AHEAD} window)")
 
 
+def _mark_heard(station):
+    """Record the track under the cursor as actually played.
+
+    Idempotent — called every tick while the speaker is PLAYING, and
+    SongMemory.mark_heard is a no-op on a song already marked. That is cheaper
+    than tracking which index we last marked, and correct across a jump
+    backwards, where the listener really is hearing the track again.
+
+    A track the listener skips through between two polls is never marked, and
+    that is the right answer: it was not heard, so it should not be excluded
+    for seven days, and it should not be a candidate for the oldest-heard
+    floor.
+    """
+    # station.memory and station.tracks are both guarded by Station.lock, and
+    # this is called from the loop *outside* the `with station.lock` block that
+    # wraps _top_up — so it takes the lock itself. Order is
+    # Station.lock -> _STATE_LOCK, per the Global Constraint; inverting it here
+    # deadlocks against _top_up, which holds them in that order.
+    with station.lock:
+        if not station.tracks or not 0 <= station.index < len(station.tracks):
+            return
+        vid = station.tracks[station.index]['video_id']
+        with _STATE_LOCK:
+            station.memory.mark_heard(vid)
+            _HISTORY.mark_heard(vid)
+
+
+def _flush_history(force=False):
+    """Write the history to disk, at most once per HISTORY_FLUSH_INTERVAL.
+
+    The snapshot is taken under the lock and the write happens outside it. A
+    2000-entry json.dump is milliseconds, but _STATE_LOCK is also held by every
+    /media range request and every scheduler dispatch, and this runs on a timer
+    forever — so it is exactly the kind of small cost that becomes an audible
+    stall at the wrong moment.
+
+    During playback, `dirty` is set every tick (mark_heard advances last_at on
+    the playing song), so HISTORY_FLUSH_INTERVAL is the real rate limit. `dirty`
+    only skips writes while nothing is playing.
+    """
+    global _HISTORY_FLUSHED_AT
+    now = time.time()
+    with _STATE_LOCK:
+        if not _HISTORY.dirty:
+            return
+        if not force and now - _HISTORY_FLUSHED_AT < HISTORY_FLUSH_INTERVAL:
+            return
+        _HISTORY_FLUSHED_AT = now
+        payload = _HISTORY.snapshot()
+    songs.save_history(_HISTORY_PATH, payload)
+
+
+def _load_history():
+    payload = songs.load_history(_HISTORY_PATH)
+    with _STATE_LOCK:
+        _HISTORY.restore(payload)
+        count = len(_HISTORY)
+    logger.info(f"Loaded {count} remembered songs from {_HISTORY_PATH}")
+
+
 def _station_loop(device_ip, generation):
     """Follow the speaker's queue position; prefetch ahead and evict behind.
 
@@ -1755,9 +1923,11 @@ def _station_loop(device_ip, generation):
                 station.index = min(position - 1, len(station.tracks) - 1)
                 _reprioritize(station)
 
-            if state == 'PLAYING' and not station.playing_seen:
-                station.playing_seen = True
-                logger.info(f"Playback started on {device_ip}; prefetching ahead")
+            if state == 'PLAYING':
+                if not station.playing_seen:
+                    station.playing_seen = True
+                    logger.info(f"Playback started on {device_ip}; prefetching ahead")
+                _mark_heard(station)
 
             if state == 'STOPPED':
                 station.idle_polls += 1
@@ -1775,6 +1945,7 @@ def _station_loop(device_ip, generation):
                         _top_up(station)
                 _flush_queue(station, coordinator)
                 _evict(station)
+                _flush_history()
         except Exception as e:
             logger.warning(f"Station loop error for {device_ip}: {e}")
 
@@ -1829,6 +2000,7 @@ def end_station(device_ip):
                 download = _DOWNLOADS.get(vid)
                 if download is not None and download.state == 'queued':
                     download.cancel()
+    _flush_history(force=True)
 
 
 def _drop_pending_downloads(discarded):
@@ -1875,7 +2047,7 @@ def refresh_station(coordinator, station):
     between the two lists misaligns every position calculation for the rest of
     the session.
 
-    `played_ids` / `played_titles` / `_RECENT` are all left intact, which is
+    `station.memory` and `_HISTORY` are left intact, which is
     precisely why the refill is new — the discarded tracks stay excluded.
     """
     with station.lock:
@@ -1949,8 +2121,8 @@ def remove_from_station(coordinator, station, index, video_id):
     track the index now names a different song, and deleting the wrong one is
     silent — the listener sees a row vanish and has no reason to doubt it.
 
-    `played_ids` / `played_titles` / `_RECENT` keep the removed id, so the
-    top-up that refills the tail cannot hand it straight back.
+    `station.memory` and `_HISTORY` keep the removed id, so the top-up that
+    refills the tail cannot hand it straight back.
     """
     with station.lock:
         position = _queue_position(coordinator)
@@ -2574,6 +2746,59 @@ def downloads_view():
         } for vid, d in _DOWNLOADS.items()]
     return jsonify({'workers': DOWNLOAD_WORKERS, 'gate': PREFETCH_GATE,
                     'running': running, 'pending': pending, 'downloads': rows})
+
+
+@app.route('/api/history')
+def history():
+    """What the app remembers hearing, newest first.
+
+    Modelled on /api/downloads: read-only, no speaker call, and its purpose is
+    to make an invisible decision inspectable. `limit` caps the response
+    because HISTORY_MAX is 2000 and the default 100 is enough to answer 'why
+    did it skip that song'.
+    """
+    try:
+        limit = int(request.args.get('limit', 100))
+    except (ValueError, TypeError):
+        return jsonify({'error': 'limit must be an integer'}), 400
+    limit = max(1, min(limit, HISTORY_MAX))
+    now = time.time()
+    # Materialise every field we need under the lock because Entry.ids is a
+    # plain dict that SongMemory.add mutates in place when it merges a new
+    # upload. sorted(e.ids, ...) racing that mutation raises RuntimeError.
+    with _STATE_LOCK:
+        total = len(_HISTORY)
+        rows = [
+            {
+                'id': e.best_id(),
+                'ids': sorted(e.ids, key=lambda v: e.ids[v]),
+                'title': e.title,
+                'artist': e.artist,
+                'duration': e.duration,
+                'heard': e.heard,
+                'last_at': e.last_at,
+            }
+            for e in _HISTORY.entries(now)
+        ]
+    rows.sort(key=lambda r: r['last_at'], reverse=True)
+    return jsonify({
+        'total': total,
+        'version': songs.HISTORY_VERSION,
+        'ttl': HISTORY_TTL,
+        'max': HISTORY_MAX,
+        'songs': [
+            {
+                'id': r['id'],
+                'ids': r['ids'],
+                'title': r['title'],
+                'artist': r['artist'],
+                'duration': r['duration'],
+                'heard': r['heard'],
+                'age': round(now - r['last_at'], 1),
+            }
+            for r in rows[:limit]
+        ],
+    })
 
 
 @app.route('/api/stop', methods=['POST'])
@@ -3269,4 +3494,6 @@ if __name__ == '__main__':
     logger.info(f"Initializing app on stream host: {STREAM_HOST} (port {PORT})")
     _log_ytdlp_version()
     cache_scan()
+    _load_history()
+    atexit.register(lambda: _flush_history(force=True))
     app.run(host='0.0.0.0', port=PORT, threaded=True)

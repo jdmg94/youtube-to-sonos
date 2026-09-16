@@ -1,11 +1,13 @@
 "use client";
 
+import { useCallback, useState } from "react";
 import { toast } from "sonner";
 
 import { AppHeader } from "@/components/app-header";
 import { LightsPanel } from "@/components/lights-panel";
-import { MiniPlayer } from "@/components/mini-player";
 import { NowPlayingCard } from "@/components/now-playing";
+import { PlayerBar } from "@/components/player-bar";
+import { PlayerSheet } from "@/components/player-sheet";
 import { QueuePanel } from "@/components/queue-panel";
 import { SpeakerDialog } from "@/components/speaker-dialog";
 import { StreamController } from "@/components/stream-controller";
@@ -16,9 +18,9 @@ import { usePersistedState } from "@/lib/hooks/use-persisted-state";
 import { useSpeaker } from "@/lib/hooks/use-speaker";
 import {
   DEFAULT_TAB,
-  describeMiniPlayer,
-  isAppTab,
+  describePlayerBar,
   panelVisible,
+  readTab,
   type AppTab,
   type Panel,
 } from "@/lib/shell";
@@ -36,12 +38,13 @@ const TAB_KEY = "yts.tab";
  * otherwise.
  *
  * Two layouts, one DOM. Above 900px this is a sidebar and a main column with
- * everything on screen at once; below it the same four panels are split across
- * three tabs and only one tab's worth is visible. The phone layout is not a
- * second tree — the column wrappers collapse to `display: contents` and the
- * panels for other tabs are hidden — because a second tree would mean two
- * `useEvents` subscriptions polling the same speaker on their own offsets, and
- * a URL half-typed into whichever `StreamController` was not mounted.
+ * everything on screen at once; below it the four panels are split across two
+ * tabs and the player — which is not a panel — is a sheet that slides over
+ * whichever tab is showing. The phone layout is not a second tree — the column
+ * wrappers collapse to `display: contents` and the panels for the other tab
+ * are hidden — because a second tree would mean two `useEvents` subscriptions
+ * polling the same speaker on their own offsets, and a URL half-typed into
+ * whichever `StreamController` was not mounted.
  */
 export default function Home() {
   const { devices, loading, error, refresh, selected, select } = useSpeaker();
@@ -56,16 +59,30 @@ export default function Home() {
   const { nowPlaying, station } = useEvents(selected?.ip ?? null);
 
   /*
-   * Persisted, and validated on the way out. The tab is where someone left the
-   * app — usually the queue, since that is what you watch — and re-opening on
-   * the Player every time is a tap they did not ask for. `isAppTab` is what
-   * stops a renamed tab in an older build's storage rendering a phone screen
-   * with every panel hidden and no error anywhere.
+   * Persisted, and read through `readTab` rather than used raw. The tab is
+   * where someone left the app, and a stale id from an older build renders a
+   * phone screen with every panel hidden and no error anywhere. The last two
+   * releases both retired one: `player` became a sheet, `lights` grew into
+   * Settings — and `readTab` knows that the second has somewhere to land and
+   * the first does not.
    */
   const [stored, setTab] = usePersistedState<AppTab>(TAB_KEY, DEFAULT_TAB);
-  const tab = isAppTab(stored) ? stored : DEFAULT_TAB;
+  const tab = readTab(stored);
 
-  const mini = describeMiniPlayer(tab, nowPlaying, station, selected?.name ?? null);
+  /*
+   * The player sheet, and deliberately *not* persisted alongside the tab.
+   * Where you were browsing is worth restoring; a sheet you opened to skip a
+   * track is a transient thing, and reopening the app underneath one is a
+   * dialog nobody asked for.
+   *
+   * `useCallback` because `PlayerSheet` has effects keyed on this — a new
+   * identity every render would re-run the media-query listener on every SSE
+   * frame.
+   */
+  const [playerOpen, setPlayerOpen] = useState(false);
+  const closePlayer = useCallback(() => setPlayerOpen(false), []);
+
+  const bar = describePlayerBar(nowPlaying, station, selected?.name ?? null);
 
   return (
     <>
@@ -78,8 +95,21 @@ export default function Home() {
        * internally instead of pushing the page taller than the viewport — a
        * flex/grid child defaults to a min-content floor, which silently defeats
        * `overflow-y: auto` further down.
+       *
+       * `content-start` on the phone layout, and only there. This grid is
+       * `flex-1`, so on a tab whose panels do not fill the screen it is taller
+       * than its own rows — and a grid's default `align-content` shares that
+       * slack out over every `auto` row, which is not padding anybody chose.
+       * Measured on the Settings tab: 77px added to each of three rows, which
+       * turned the 68px speaker panel into a 145px one. Pushing the rows to
+       * the top instead leaves the leftover as one piece of background below
+       * the last panel, where it reads as the end of the page.
+       *
+       * Above 900px the stretch is the point and this must not apply: the two
+       * `Column`s are grid items that scroll internally, and a column sized to
+       * its content rather than to the viewport has nothing to scroll within.
        */}
-      <main className="grid w-full min-h-0 max-w-[1200px] flex-1 grid-cols-1 gap-4 px-4 pb-8 [&>*]:min-h-0 min-[601px]:gap-6 min-[601px]:px-6 min-[901px]:grid-cols-[340px_1fr] min-[901px]:pb-6">
+      <main className="grid w-full min-h-0 max-w-[1200px] flex-1 grid-cols-1 gap-4 px-4 pb-8 [&>*]:min-h-0 max-[900px]:content-start min-[601px]:gap-6 min-[601px]:px-6 min-[901px]:grid-cols-[340px_1fr] min-[901px]:pb-6">
         {/*
          * On desktop the *column* scrolls, not the queue inside it. The panels
          * above are `shrink-0`, so when the viewport is short something has to
@@ -93,7 +123,38 @@ export default function Home() {
          * direct children of the grid above, stacked in source order.
          */}
         <Column>
-          <Section panel="player" tab={tab} className="gap-4">
+          {/*
+           * The player belongs to no tab: on a phone it is a sheet over
+           * whichever one is showing, and here it is the sidebar's first panel
+           * exactly as before. `PlayerSheet` is both, which is why it sits in
+           * the column rather than beside `PlayerBar` at the end of the page —
+           * above 900px this is a `static` element and its position in the DOM
+           * is its position on screen.
+           */}
+          <PlayerSheet open={playerOpen} onClose={closePlayer} className="gap-4">
+            <NowPlayingCard device={selected} nowPlaying={nowPlaying} station={station} />
+            <VolumePanel device={selected} />
+          </PlayerSheet>
+
+          {/*
+           * The speaker picker used to be the first thing inside the sheet.
+           * It is here instead because choosing a box to play on is not part
+           * of playing — it is the same once-a-week decision as choosing which
+           * lamps follow the music, and the two now sit together under
+           * Settings. One DOM position serves both layouts, as ever: the sheet
+           * above is `fixed` on a phone and so its neighbours mean nothing
+           * there, and `static` above 900px, where this lands directly beneath
+           * it in the sidebar.
+           *
+           * `p-3` rather than the default `p-5`: this panel is a single 44px
+           * row, and a full panel's padding around one row reads as an empty
+           * box with something small lost in the middle. No heading either —
+           * the row already says "Controlling Kitchen".
+           *
+           * That padding only survives because the grid above is
+           * `max-[900px]:content-start`; see the comment there.
+           */}
+          <Section panel="speaker" tab={tab} className="p-3">
             <SpeakerDialog
               devices={devices}
               loading={loading}
@@ -105,8 +166,6 @@ export default function Home() {
                 toast.success(`Selected speaker: ${device.name}`);
               }}
             />
-            <NowPlayingCard device={selected} nowPlaying={nowPlaying} station={station} />
-            <VolumePanel device={selected} />
           </Section>
 
           {/*
@@ -138,21 +197,20 @@ export default function Home() {
         </Column>
 
         {/*
-         * The mini player is `fixed`, so it takes up no room; this reserves its
+         * The player bar is `fixed`, so it takes up no room; this reserves its
          * height at the end of the scroll so the last panel's final row is not
-         * permanently underneath it. Both this and the bar read the same
-         * `mini.visible`, which is why the spacer cannot outlive the bar.
+         * permanently underneath it. Unconditional now that the bar is — it
+         * used to be gated on the same `visible` flag the old mini player was,
+         * which was the only thing keeping the two from drifting apart.
          */}
-        {mini.visible && (
-          <div aria-hidden className="h-[var(--mini-player)] min-[901px]:hidden" />
-        )}
+        <div aria-hidden className="h-[var(--player-bar)] min-[901px]:hidden" />
       </main>
 
       <footer className="mt-auto w-full shrink-0 border-t border-border p-8 text-center text-[0.85rem] text-muted-foreground max-[900px]:hidden">
         YouTube ➔ Sonos Streamer &copy; 2026. Powered by Soco, yt-dlp &amp; FFmpeg.
       </footer>
 
-      <MiniPlayer view={mini} onOpen={() => setTab("player")} />
+      <PlayerBar view={bar} expanded={playerOpen} onOpen={() => setPlayerOpen(true)} />
       <TabBar tab={tab} onChange={setTab} />
     </>
   );

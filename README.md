@@ -253,8 +253,13 @@ this compose file. See "Changing the API address needs a rebuild" above.
 | MAX_TRACKS_PER_ARTIST | 2 | Cap on tracks one artist contributes per queue refill.  |
 | ARTIST_COOLDOWN | 4     | Recently-heard artists pushed to the back of a refill.    |
 | STATION_PICK_POOL | 3   | Top candidates the next track is drawn from at random.    |
-| RECENT_MAX    | 300      | Tracks remembered process-wide so they aren't re-served.  |
-| RECENT_TTL    | 43200    | Seconds a remembered track stays excluded (12h).          |
+| HISTORY_TTL | 604800 | Seconds a heard song stays excluded (7 days).              |
+| HISTORY_MAX | 2000 | Cap on songs remembered across all stations.                |
+| HISTORY_QUEUED_TTL | 7200 | Seconds a queued but unheard song stays excluded (2 hours).|
+| HISTORY_FLUSH_INTERVAL | 60 | Seconds between history.json writes.                   |
+| SEEN_UNQUEUED_MAX | 300 | Songs a station remembers seeing but never queuing.      |
+| MIX_LIMIT | 50 | Tracks pulled from each radio mix.                            |
+| MIX_CACHE_MAX | 200 | Maximum mixes memoized.                                   |
 | EVENT_POLL_INTERVAL | 2 | Seconds between now-playing polls for the SSE stream.     |
 
 ### The cache volume
