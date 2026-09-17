@@ -98,6 +98,13 @@ async function settlePlay(result: PlayResponse = playResponse()) {
   await flush();
 }
 
+async function failPlay(message = "Speaker unreachable") {
+  const waiting = pendingPlay;
+  pendingPlay = [];
+  for (const call of waiting) call.reject(new ApiError(message, 502));
+  await flush();
+}
+
 async function flush() {
   await act(async () => {
     await Promise.resolve();
@@ -317,6 +324,9 @@ describe("useStream — casting", () => {
     assert.equal(plays[0].mode, "next");
     await settlePlay();
 
+    // A fresh lookup, because the first cast consumed the panel the buttons
+    // hang off.
+    await analyzed();
     act(() => void stream.cast("now"));
     assert.equal(plays[1].mode, "now");
     await settlePlay();
@@ -407,14 +417,34 @@ describe("useStream — casting", () => {
   });
 
   it("allows a second cast once the first has landed", async () => {
-    // The latch has to release, or the buttons are dead for the session.
+    // The latch has to release, or the buttons are dead for the session. The
+    // second lookup is the panel being consumed by the first cast, not the
+    // latch staying shut — hence the separate test below for that.
     render();
     await analyzed();
     act(() => void stream.cast("now"));
     await settlePlay();
+
+    await analyzed("https://youtu.be/second");
     act(() => void stream.cast("next"));
     assert.equal(plays.length, 2);
+    assert.equal(plays[1].url, "https://youtu.be/second");
     await settlePlay();
+  });
+
+  it("refuses to send the same track twice without a fresh lookup", async () => {
+    // The consequence of clearing the panel: the buttons go with it, so a
+    // second press has nothing to send. Which is what we want — "Play now" on
+    // the track the speaker just started would tear the station down and
+    // rebuild it around the song already playing.
+    render();
+    await analyzed();
+    act(() => void stream.cast("now"));
+    await settlePlay();
+
+    act(() => void stream.cast("now"));
+    assert.equal(plays.length, 1);
+    assert.equal(stream.castError, null, "silence, not an error the user caused");
   });
 
   it("clears the box once the track is away", async () => {
@@ -428,13 +458,46 @@ describe("useStream — casting", () => {
     assert.equal(stream.url, "");
   });
 
-  it("keeps the analyzed video on screen after casting it", async () => {
-    // The box empties; the panel does not. What is playing stays visible.
+  it("clears the analyzed video once the track is away", async () => {
+    // The panel's job ends the moment the speaker has the track: from there on
+    // the Now Playing card says what is playing, and a panel still describing
+    // the same song beside it is two sources for one fact that drift apart the
+    // instant the station advances.
+    render();
+    await analyzed("https://youtu.be/abc");
+    act(() => void stream.cast("now"));
+    assert.equal(stream.analyzed?.url, "https://youtu.be/abc", "not before the server has it");
+    await settlePlay();
+    assert.equal(stream.analyzed, null);
+  });
+
+  it("forgets the cast video across a remount", async () => {
+    // The panel is persisted. Clearing only the in-memory copy puts it back on
+    // the next reload, pointing at a song that finished hours ago.
     render();
     await analyzed("https://youtu.be/abc");
     act(() => void stream.cast("now"));
     await settlePlay();
+
+    act(() => root!.unmount());
+    root = createRoot(container!);
+    render();
+
+    assert.equal(stream.analyzed, null);
+  });
+
+  it("keeps the panel and the box when a cast fails", async () => {
+    // Nothing reached the speaker, so nothing is playing to take the panel's
+    // place — and clearing it would cost a second yt-dlp round trip to retry a
+    // song the user already looked up.
+    render();
+    await analyzed("https://youtu.be/abc");
+    act(() => void stream.cast("now"));
+    await failPlay();
+
     assert.equal(stream.analyzed?.url, "https://youtu.be/abc");
+    assert.equal(stream.url, "https://youtu.be/abc");
+    assert.equal(stream.castError?.message, "Speaker unreachable");
   });
 
   it("hands the response back so the caller can tell the user what happened", async () => {
