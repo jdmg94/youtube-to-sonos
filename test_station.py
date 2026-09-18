@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import random
+import time
 import unittest
 
 import app
@@ -280,6 +281,82 @@ class TestExhaustedFlag(unittest.TestCase):
         self.assertTrue(
             station.exhausted,
             "_top_up overwrote exhausted flag that _pick_next set"
+        )
+
+
+class TestDiscardedTracks(unittest.TestCase):
+    """A track the listener throws away must not come back tomorrow.
+
+    Merely leaving the id in `_HISTORY` is not enough and the difference is
+    invisible: a *queued* entry expires in HISTORY_QUEUED_TTL (2h) and is
+    dropped by `snapshot()`, so the exclusion dies with the process or with the
+    afternoon. Promoting it to heard is what buys the 7-day TTL and the line in
+    history.json, which together are what "not the same song tomorrow, and not
+    when I reseed" actually means.
+    """
+
+    TRACK = {'id': 'vid-discard', 'title': 'Some Artist - A Song',
+             'uploader': 'Some Artist', 'duration': 200}
+
+    def setUp(self):
+        self._real_history = app._HISTORY
+        self.addCleanup(lambda: setattr(app, '_HISTORY', self._real_history))
+        app._HISTORY = songs.SongMemory(ttl=app.HISTORY_TTL,
+                                        queued_ttl=app.HISTORY_QUEUED_TTL,
+                                        max_songs=app.HISTORY_MAX)
+        self.station = app.Station('10.0.0.9', 0)
+        self.meta = self.station.add(dict(self.TRACK))
+        self.song = songs.attribute(dict(self.TRACK))
+
+    def test_queued_but_not_discarded_expires(self):
+        """The baseline: without a discard, the entry is queued and short-lived.
+
+        Pinned so the test below is known to be measuring the discard rather
+        than a memory that would have kept the song anyway.
+        """
+        later = time.time() + app.HISTORY_QUEUED_TTL + 1
+        self.assertIsNone(app._HISTORY.find(self.song, now=later))
+        self.assertEqual(app._HISTORY.snapshot()['entries'], [])
+
+    def test_discard_outlives_the_queued_ttl(self):
+        app._discard_tracks([self.meta])
+        later = time.time() + app.HISTORY_QUEUED_TTL + 1
+        self.assertIsNotNone(
+            app._HISTORY.find(self.song, now=later),
+            "a removed track expired after HISTORY_QUEUED_TTL, so it can be "
+            "queued again the same afternoon"
+        )
+
+    def test_discard_survives_a_restart(self):
+        app._discard_tracks([self.meta])
+        restored = songs.SongMemory(ttl=app.HISTORY_TTL,
+                                    queued_ttl=app.HISTORY_QUEUED_TTL,
+                                    max_songs=app.HISTORY_MAX)
+        restored.restore(app._HISTORY.snapshot())
+        self.assertIsNotNone(
+            restored.find(self.song),
+            "a removed track was dropped by snapshot(), so it comes back on "
+            "the next restart"
+        )
+
+    def test_discard_is_recorded_even_when_the_download_is_spared(self):
+        """The download guards must not gate the memory.
+
+        `_discard_tracks` leaves a download alone when a /media socket is on it
+        or another station still lists it. That is a statement about the wire,
+        not about what the listener wants to hear: skipping the mark for those
+        ids would silently lose the rejection for exactly the tracks most
+        likely to be handed back.
+        """
+        app._INUSE[self.meta['video_id']] += 1
+        self.addCleanup(lambda: app._INUSE.pop(self.meta['video_id'], None))
+
+        app._discard_tracks([self.meta])
+
+        later = time.time() + app.HISTORY_QUEUED_TTL + 1
+        self.assertIsNotNone(
+            app._HISTORY.find(self.song, now=later),
+            "a removed track with an open /media reader was not remembered"
         )
 
 

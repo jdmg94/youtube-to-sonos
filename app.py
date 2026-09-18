@@ -2003,22 +2003,42 @@ def end_station(device_ip):
     _flush_history(force=True)
 
 
-def _drop_pending_downloads(discarded):
-    """Cancel the pending downloads of tracks a station has just thrown away.
+def _discard_tracks(discarded):
+    """Retire tracks a station just threw away: remember them, stop fetching them.
 
-    Shared by `refresh_station` and `remove_from_station`, with end_station's
-    guards: never touch a track another station still lists or a /media reader
-    is on, and `cancel()` (penalty-free) rather than `finish('failed')`, which
-    would put the track in a retry cooldown it did nothing to earn.
+    The single seam for both removal paths — `refresh_station` and
+    `remove_from_station` — so the two cannot drift on what discarding means.
 
-    Running downloads are deliberately left alone — cancelling one out from
-    under an open /media socket would stall the speaker reading it.
+    **Remembering is the point, and it is not the same as merely not
+    forgetting.** `Station.add` already recorded each of these in `_HISTORY`,
+    but as *queued*: that expires in HISTORY_QUEUED_TTL (2h) and `snapshot()`
+    drops it, so the exclusion dies with the afternoon, dies at the next
+    restart, and dies outright the moment the listener reseeds and this station
+    goes away. Promoting it to heard is what makes a rejection last HISTORY_TTL
+    (7d) and survive both — which is what a listener means by removing a song.
+    It is a small lie (nobody heard it) told in the one place where heard and
+    rejected want identical treatment, and the repeat floor is unharmed by it:
+    `mark_heard` stamps `last_at = now` while `_reserve_oldest` takes the
+    *least* recently heard, so a just-rejected song sorts to the far end of
+    everything that floor would ever re-serve.
+
+    The mark happens before the download guards, deliberately. Those guards are
+    about the wire — never cancel a track another station still lists or a
+    /media reader is on, and `cancel()` (penalty-free) rather than
+    `finish('failed')`, which would impose a retry cooldown the track did
+    nothing to earn. They have nothing to say about what the listener wants to
+    hear, and letting them skip the mark would silently lose the rejection for
+    exactly the tracks most likely to be handed straight back.
+
+    Running downloads are likewise left alone — cancelling one out from under an
+    open /media socket would stall the speaker reading it.
     """
     with _STATE_LOCK:
         wanted = {m['video_id'] for other in STATION.values()
                   for m in other.tracks}
         for meta in discarded:
             vid = meta['video_id']
+            _HISTORY.mark_heard(vid)
             if vid in wanted or _INUSE.get(vid):
                 continue
             if _SCHED.cancel(vid):
@@ -2047,8 +2067,12 @@ def refresh_station(coordinator, station):
     between the two lists misaligns every position calculation for the rest of
     the session.
 
-    `station.memory` and `_HISTORY` are left intact, which is
-    precisely why the refill is new — the discarded tracks stay excluded.
+    `station.memory` and `_HISTORY` are left intact, which is precisely why the
+    refill is new — the discarded tracks stay excluded. `_discard_tracks` then
+    promotes them from queued to heard in `_HISTORY`, so the exclusion outlives
+    this station and this process rather than expiring in two hours: a tail the
+    listener called stale is not one to offer again tomorrow, or from the next
+    seed.
     """
     with station.lock:
         position = _queue_position(coordinator)
@@ -2090,7 +2114,7 @@ def refresh_station(coordinator, station):
         station.played_order = [v for v in station.played_order
                                 if v not in surviving] + survivors
 
-        _drop_pending_downloads(dropped)
+        _discard_tracks(dropped)
 
         logger.info(f"Refreshing station on {station.device_ip}: dropped "
                     f"{len(dropped)} track(s) after position {cursor + 1}")
@@ -2122,7 +2146,11 @@ def remove_from_station(coordinator, station, index, video_id):
     silent — the listener sees a row vanish and has no reason to doubt it.
 
     `station.memory` and `_HISTORY` keep the removed id, so the top-up that
-    refills the tail cannot hand it straight back.
+    refills the tail cannot hand it straight back — and `_discard_tracks`
+    promotes it from queued to heard in `_HISTORY`, which is what extends that
+    from "not again in the next two hours, on this station" to "not again this
+    week, from any seed, across a restart". Removing a song is the only signal
+    the listener has for 'not this one', and it should mean it.
     """
     with station.lock:
         position = _queue_position(coordinator)
@@ -2165,7 +2193,7 @@ def remove_from_station(coordinator, station, index, video_id):
         station.exhausted = False
         # Everything after the removal is now one track closer to the cursor.
         _reprioritize(station)
-        _drop_pending_downloads([meta])
+        _discard_tracks([meta])
 
     logger.info(f"Removed {meta['video_id']} from station on "
                 f"{station.device_ip} at index {index}")
