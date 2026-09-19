@@ -768,9 +768,11 @@ class TestBuildQueue(unittest.TestCase):
         for i in range(len(artists) - 1):
             self.assertNotEqual(artists[i], artists[i + 1])
 
-    def test_cooldown_artists_ordered_last(self):
-        # A cooled-down artist's first track appears after every fresh artist's
-        # first track, but is not dropped.
+    def test_cooldown_artists_excluded(self):
+        # A cooled-down artist is dropped from this build entirely, not just
+        # reordered — a mix dominated by one cluster should come back empty
+        # (forcing the caller's widen ladder) rather than quietly serving that
+        # cluster again a few slots later.
         entries = [
             {'id': 'cool1', 'title': 'Cooled - Song 1', 'uploader': 'Cooled', 'duration': 200},
             {'id': 'fresh1', 'title': 'Fresh - Song 1', 'uploader': 'Fresh', 'duration': 200},
@@ -778,13 +780,8 @@ class TestBuildQueue(unittest.TestCase):
         ]
         queue = songs.build_station_queue(entries, [], cooldown_artists=['cooled'])
         artists = [songs.attribute(e).artist for e in queue]
-        # The cooled artist's first track appears after the fresh artists' first tracks
-        first_cooled = next((i for i, a in enumerate(artists) if a == 'cooled'), None)
-        self.assertIsNotNone(first_cooled)
-        # Both fresh artists appear before the cooled one
-        self.assertGreater(first_cooled, 0)
-        self.assertEqual(artists[0], 'fresh')
-        self.assertEqual(artists[1], 'another')
+        self.assertNotIn('cooled', artists)
+        self.assertEqual(sorted(artists), ['another', 'fresh'])
 
     def test_unknown_artist_treated_as_unique(self):
         # Two entries with no resolvable artist do not share a bucket and are

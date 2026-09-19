@@ -567,12 +567,20 @@ def build_station_queue(entries, memories, cooldown_artists=(),
     memories: iterable of SongMemory to exclude against, consulted in order.
               Two in production — the station's own and the 7-day history —
               and the ladder's rungs 4 and 5 work by passing fewer of them.
-    cooldown_artists: artists that should appear after fresh ones in the queue.
+    cooldown_artists: artists hard-excluded from THIS build (not merely
+              demoted). An artist a mix keeps re-offering is exactly the
+              artist that should force the caller's widen ladder to run —
+              reseed further out or drop down a rung — rather than quietly
+              resurfacing a few slots later, which let one dense cluster in
+              the mix graph (e.g. a viral sub-genre) dominate a session even
+              with cooldown "on". It is meant to be temporary, and IS dropped
+              by the caller's rung 5.
     max_per_artist: cap on tracks from one artist in the built queue.
     on_reject: optional callable(entry, reason) invoked for each candidate
-              dropped by a *fuzzy* match ('exact'/'subset'/'overlap', never
-              'id'). This is how the rejection log in Task 9 gets its data
-              without this function knowing what a logger is.
+              dropped by a *fuzzy* match ('exact'/'subset'/'overlap'); never
+              for an 'id' match or a cooldown exclusion, which are the normal
+              case and would bury the judgements that are actually worth
+              reading.
 
     Returns a list of entries, each carrying an added 'id' rewritten to the
     best-ranked upload of that song.
@@ -615,21 +623,21 @@ def build_station_queue(entries, memories, cooldown_artists=(),
             # slot stays where the first one put it.
             pool.add(song)
 
-    # 2. Bucket by artist and cap.
+    # 2. Bucket by artist and cap. Cooldown artists are excluded here, not
+    #    demoted — see the cooldown_artists doc above.
     buckets = {}
     order = []
     for entry in slots:
         akey = entry.artist or entry.best_id()   # unknown artist -> unique
+        if akey in cooldown:
+            continue
         if akey not in buckets:
             buckets[akey] = []
             order.append(akey)
         if len(buckets[akey]) < max_per_artist:
             buckets[akey].append(entry)
 
-    # 3. Fresh artists before cooled-down ones (stable, so relevance survives).
-    order.sort(key=lambda a: a in cooldown)
-
-    # 4. Round-robin -> no artist back to back.
+    # 3. Round-robin -> no artist back to back.
     queue = []
     while any(buckets[a] for a in order):
         for a in order:

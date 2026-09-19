@@ -412,6 +412,15 @@ def _yt_error_response(err, context):
 MAX_TRACKS_PER_ARTIST = int(os.environ.get('MAX_TRACKS_PER_ARTIST', 2))
 ARTIST_COOLDOWN = int(os.environ.get('ARTIST_COOLDOWN', 4))
 STATION_PICK_POOL = max(1, int(os.environ.get('STATION_PICK_POOL', 3)))
+# Reseeding normally draws from this station's own recent walk only
+# (`_reseed_ids`), which has no way back to where the walk started — so a
+# session that drifts into a dense, self-reinforcing cluster (a viral
+# sub-genre whose RD mixes are mostly each other) never drifts back out on
+# its own. With this probability, once the walk is long enough that the
+# original seed has scrolled out of the recent window, a reseed uses that
+# original seed instead of a random recent track — a periodic pull back
+# toward the genre the listener actually picked.
+ANCHOR_REVISIT_PROB = float(os.environ.get('ANCHOR_REVISIT_PROB', 0.34))
 # How long a song stays "already heard", and how many are remembered. Seven
 # days is the span over which a listener notices a repeat; the cap is what
 # stops the file and the match cost growing without bound on a box that never
@@ -663,12 +672,26 @@ def _reseed_ids(played_order):
     back, so the candidate pool blends 'related to what's playing now' with a
     different point in the walk — this is the main lever against orbiting one
     artist. The second seed is random rather than a fixed offset because a fixed
-    one makes the whole walk reproducible: same seed, same mix, same queue."""
+    one makes the whole walk reproducible: same seed, same mix, same queue.
+
+    Both seeds are still drawn from the walk itself, though, which is exactly
+    what lets a session drift and stay drifted: YouTube's own RD-mix graph has
+    dense, mutually-reinforcing clusters (a currently-viral sub-genre whose
+    mixes mostly point back into each other), and once any track pulls the
+    walk into one, every future seed is drawn from inside it — there is
+    nothing here that ever points back the other way. `played_order[0]` is
+    the track that actually started the station, so with probability
+    ANCHOR_REVISIT_PROB (once it's old enough to have left the 9-track
+    window `window` already draws from) it stands in for the random second
+    seed instead — a periodic reseed from where the listener started, not
+    just from wherever the walk has since wandered to."""
     if not played_order:
         return []
     seeds = [played_order[-1]]
     window = played_order[-9:-1]
-    if window:
+    if len(played_order) > 9 and random.random() < ANCHOR_REVISIT_PROB:
+        seeds.append(played_order[0])
+    elif window:
         seeds.append(random.choice(window))
     return seeds
 
@@ -1672,8 +1695,8 @@ def _pick_next(station, refresh=False, fetch=None):
         station.exhausted = False
         return _choose(station, queue, entries)
 
-    # Rung 5: lift the artist cap, keep the song filter. Two songs by one
-    # artist in a row is a much smaller harm than the same song twice.
+    # Rung 5: lift the artist cap and drop the artist cooldown — two songs by
+    # one artist in a row is a much smaller harm than the same song twice.
     queue = build_station_queue(entries, [station.memory],
                                 max_per_artist=len(entries) or 1)
     if queue:
