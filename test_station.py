@@ -417,5 +417,46 @@ class TestArtistCooldown(unittest.TestCase):
         )
 
 
+class TestReseedAnchor(unittest.TestCase):
+    """_reseed_ids must be able to reach back to where the walk started."""
+
+    def test_short_walk_never_anchors(self):
+        """Fewer than 10 plays: played_order[0] is still inside the normal
+        9-track window, so anchoring would just be indistinguishable noise —
+        it must not fire yet."""
+        old = app.ANCHOR_REVISIT_PROB
+        self.addCleanup(lambda: setattr(app, 'ANCHOR_REVISIT_PROB', old))
+        app.ANCHOR_REVISIT_PROB = 1.0  # would always anchor if it could
+
+        played = [f'v{i}' for i in range(9)]
+        seeds = app._reseed_ids(played)
+        self.assertNotIn('v0', seeds[1:])  # only via the normal window, if at all
+
+    def test_long_walk_can_anchor_to_original_seed(self):
+        """Past the 9-track window, ANCHOR_REVISIT_PROB=1 must always reseed
+        from played_order[0] — the track that actually started the station —
+        instead of a random recent one."""
+        old = app.ANCHOR_REVISIT_PROB
+        self.addCleanup(lambda: setattr(app, 'ANCHOR_REVISIT_PROB', old))
+        app.ANCHOR_REVISIT_PROB = 1.0
+
+        played = [f'v{i}' for i in range(20)]
+        seeds = app._reseed_ids(played)
+        self.assertEqual(seeds, ['v19', 'v0'])
+
+    def test_zero_prob_never_anchors(self):
+        """ANCHOR_REVISIT_PROB=0 must behave exactly like the old window-only
+        logic even on a long walk."""
+        old = app.ANCHOR_REVISIT_PROB
+        self.addCleanup(lambda: setattr(app, 'ANCHOR_REVISIT_PROB', old))
+        app.ANCHOR_REVISIT_PROB = 0.0
+
+        played = [f'v{i}' for i in range(20)]
+        for _ in range(20):
+            seeds = app._reseed_ids(played)
+            self.assertNotEqual(seeds[1], 'v0')
+            self.assertIn(seeds[1], played[-9:-1])
+
+
 if __name__ == '__main__':
     unittest.main()

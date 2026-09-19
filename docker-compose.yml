@@ -41,6 +41,10 @@ services:
       # Escape hatch for YouTube 403s: pick the player client yt-dlp asks.
       # Unset = yt-dlp's own default. e.g. "tv" or "default,-web".
       YTDLP_PLAYER_CLIENT: "${YTDLP_PLAYER_CLIENT:-}"
+      # Chance a reseed uses the track that started the station instead of a
+      # random recently-played one, once the walk is long enough for that to
+      # apply. Pulls a drifting session back toward its original genre.
+      ANCHOR_REVISIT_PROB: "${ANCHOR_REVISIT_PROB:-0.34}"
       # Override the auto-detected LAN IP if the host has multiple NICs.
       # Sonos must be able to reach this address to pull the stream.
       # STREAM_HOST: 192.168.1.50

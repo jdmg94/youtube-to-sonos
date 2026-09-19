@@ -251,7 +251,13 @@ this compose file. See "Changing the API address needs a rebuild" above.
 | STATION_POLL_INTERVAL | 2 | Seconds between checks of the speaker's queue position.|
 | STATION_IDLE_POLLS | 150 | Idle polls before a stopped station shuts itself down.   |
 | MAX_TRACKS_PER_ARTIST | 2 | Cap on tracks one artist contributes per queue refill.  |
-| ARTIST_COOLDOWN | 4     | Recently-heard artists pushed to the back of a refill.    |
+| ARTIST_COOLDOWN | 4     | How many recently-heard artists are excluded from a       |
+|              |          | refill. They are dropped from it, not merely ranked last, |
+|              |          | so a mix that is all of them forces a wider reseed.       |
+| ANCHOR_REVISIT_PROB | 0.34 | Chance a reseed uses the track the station started   |
+|              |          | on instead of a random recent one, once the walk is long  |
+|              |          | enough for that to differ. The pull back toward the genre |
+|              |          | you picked; 0 disables it.                                |
 | STATION_PICK_POOL | 3   | Top candidates the next track is drawn from at random.    |
 | HISTORY_TTL | 604800 | Seconds a heard song stays excluded (7 days).              |
 | HISTORY_MAX | 2000 | Cap on songs remembered across all stations.                |
