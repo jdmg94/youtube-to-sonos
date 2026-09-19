@@ -210,7 +210,13 @@ export default function Home() {
         YouTube ➔ Sonos Streamer &copy; 2026. Powered by Soco, yt-dlp &amp; FFmpeg.
       </footer>
 
-      <PlayerBar view={bar} expanded={playerOpen} onOpen={() => setPlayerOpen(true)} />
+      <PlayerBar
+        view={bar}
+        device={selected}
+        nowPlaying={nowPlaying}
+        expanded={playerOpen}
+        onOpen={() => setPlayerOpen(true)}
+      />
       <TabBar tab={tab} onChange={setTab} />
     </>
   );
