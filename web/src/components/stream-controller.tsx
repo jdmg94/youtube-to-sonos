@@ -27,7 +27,10 @@ export interface StreamControllerProps {
  * Nothing here paints a now-playing state. A successful cast is reported by a
  * toast and the card above catches up on the next event frame — see
  * `NowPlayingCard` for why the card is never written to from outside the
- * stream.
+ * stream. That is also why casting empties this panel rather than leaving the
+ * track on screen: the card is about to describe the same song from the
+ * speaker's own account of it, and the panel would go stale against it at the
+ * next track change while still showing two live Play buttons.
  */
 export function StreamController({ device }: StreamControllerProps) {
   const stream = useStream(device?.ip);

@@ -46,6 +46,21 @@ export const NO_TRACK = "—";
 
 export type NowPlayingMode = "playing" | "paused" | "idle";
 
+/**
+ * The one reading of a `PlaybackState` the whole UI works from.
+ *
+ * Every control that changes what the speaker is doing needs this answer, and
+ * they do not all have a `NowPlaying` frame to hand — the player bar has a view
+ * model that deliberately carries strings rather than states. Exported so those
+ * callers ask this rather than re-testing `state === "PAUSED_PLAYBACK"` for
+ * themselves, which is the shape in which `TRANSITIONING` gets forgotten and a
+ * button flickers between queue items.
+ */
+export function playbackMode(state: PlaybackState | null | undefined): NowPlayingMode {
+  if (!state || !ENGAGED_STATES.includes(state)) return "idle";
+  return state === "PAUSED_PLAYBACK" ? "paused" : "playing";
+}
+
 export interface NowPlayingView {
   mode: NowPlayingMode;
   /** `Now playing · Kitchen`. Carries the room, so it is never just a verb. */
@@ -86,14 +101,16 @@ export function describeNowPlaying(
   const device = present(named) ? named : null;
   const suffix = device ? ` · ${device}` : "";
 
-  if (!nowPlaying || !ENGAGED_STATES.includes(nowPlaying.state)) {
+  const mode = playbackMode(nowPlaying?.state);
+  // `playbackMode` already answers "idle" for a missing frame; the second half
+  // of this test is what tells the compiler so.
+  if (mode === "idle" || !nowPlaying) {
     return { mode: "idle", label: `Idle${suffix}`, title: NO_TRACK, device };
   }
 
-  const paused = nowPlaying.state === "PAUSED_PLAYBACK";
   return {
-    mode: paused ? "paused" : "playing",
-    label: `${paused ? "Paused" : "Now playing"}${suffix}`,
+    mode,
+    label: `${mode === "paused" ? "Paused" : "Now playing"}${suffix}`,
     title: trackTitle(nowPlaying.title),
     device,
   };
@@ -107,6 +124,39 @@ export function describeNowPlaying(
  */
 function trackTitle(title: string | null): string {
   return title !== null && title.trim().length > 0 ? title : UNTITLED_TRACK;
+}
+
+/** The wide button's two faces. */
+export interface ToggleView {
+  /** What `/api/transport` is asked to do. */
+  action: "play" | "pause";
+  /** Its label, and its `aria-label`. */
+  label: string;
+}
+
+/**
+ * What the play/pause button should say and send, or `null` for no button.
+ *
+ * Deliberately narrower than "the opposite of whatever the speaker is doing":
+ * an idle speaker gets **no** action at all. `/api/stop` ends the station — the
+ * loop that prefetches, extends and evicts — while leaving the Sonos queue
+ * where it is, so a bare `play` afterwards would walk the tracks still sitting
+ * in that queue with nothing behind them, then stop dead at the end of a list
+ * nothing is extending. That is a worse outcome than a disabled button, and
+ * harder to explain: the room plays music, the app just quietly stops being a
+ * station. Starting playback is Play now's job, and it is the one path that
+ * builds a station to go with it.
+ *
+ * Keyed on the card's mode rather than on `PlaybackState` so that
+ * `TRANSITIONING` is somebody else's problem — `describeNowPlaying` already
+ * rules it "playing", and reading the raw state here would flicker the button
+ * to Play for the second or two between queue items.
+ */
+export function describeToggle(mode: NowPlayingMode): ToggleView | null {
+  if (mode === "idle") return null;
+  return mode === "paused"
+    ? { action: "play", label: "Play" }
+    : { action: "pause", label: "Pause" };
 }
 
 /**

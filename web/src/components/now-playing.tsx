@@ -4,6 +4,7 @@ import { Loader2, Music, SkipBack, SkipForward, Square } from "lucide-react";
 import { toast } from "sonner";
 
 import { Equalizer } from "@/components/equalizer";
+import { PlayPause } from "@/components/play-pause";
 import { api } from "@/lib/api/client";
 import type { Device, NowPlaying, StationBody } from "@/lib/api/types";
 import { useAction } from "@/lib/hooks/use-action";
@@ -21,15 +22,31 @@ export interface NowPlayingCardProps {
 }
 
 /**
- * What the speaker is doing, and the three controls that change it.
+ * What the speaker is doing, and the four controls that change it.
  *
  * Everything shown here is read from the event stream and nothing is written
- * back to it. Prev, Next and Stop are commands whose effect arrives a poll
- * later on the same connection — up to `EVENT_POLL_INTERVAL` (2s) — so a press
- * is acknowledged by the button going busy and by a toast, not by the card
- * changing. That lag is the price of having one source of truth: Sonos is
- * advancing this queue on its own schedule, and a card that patched itself
- * would be arguing with the speaker every few seconds over who is right.
+ * back to it. Prev, Next, Play/Pause and Stop are commands whose effect
+ * arrives a poll later on the same connection — up to `EVENT_POLL_INTERVAL`
+ * (2s) — so a press is acknowledged by the button going busy and by a toast,
+ * not by the card changing. That lag is the price of having one source of
+ * truth: Sonos is advancing this queue on its own schedule, and a card that
+ * patched itself would be arguing with the speaker every few seconds over who
+ * is right.
+ *
+ * Play/Pause is the one control that lag could actively mislead, and it is
+ * `PlayPause`'s own problem — it lives in its own component because the phone's
+ * player bar shows it too, and the press sequence that makes it honest is the
+ * part neither copy may get differently.
+ *
+ * Pause and Stop are genuinely different commands and the row is arranged to
+ * say so. Pause is `/api/transport`: the speaker holds its place and nothing
+ * else moves — the station keeps polling, prefetching and evicting, the Sonos
+ * queue is untouched, the Hue stream stays connected (its renderer follows
+ * `PLAYING`, so the lamps simply settle until the music comes back). Stop is
+ * `/api/stop`, which ends the session: the station is torn down, its queued
+ * downloads cancelled, the lights restored. One is a comma; the other is a
+ * full stop, which is why it sits apart from the three transport controls and
+ * carries no label of its own.
  */
 export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardProps) {
   const deviceIp = device?.ip;
@@ -123,20 +140,7 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
           onClick={() => transport.run("prev")}
         />
 
-        <button
-          type="button"
-          aria-label="Stop playback"
-          onClick={() => stop.run()}
-          disabled={stop.pending}
-          className="flex grow cursor-pointer items-center justify-center gap-2 rounded-[14px] border border-border bg-white/[0.08] px-4 py-[0.6rem] text-[0.9rem] font-semibold transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] hover:-translate-y-0.5 hover:bg-white/[0.15] active:translate-y-0 disabled:pointer-events-none disabled:opacity-50"
-        >
-          {stop.pending ? (
-            <Loader2 aria-hidden className="size-4 animate-spin" />
-          ) : (
-            <Square aria-hidden className="size-4" />
-          )}
-          Stop
-        </button>
+        <PlayPause device={device} state={nowPlaying?.state} variant="wide" live={live} />
 
         <NavButton
           label="Next track"
@@ -145,6 +149,29 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
           disabled={!canGoNext(station) || transport.pending}
           onClick={() => transport.run("next")}
         />
+
+        {/*
+         * Ends the session. Icon-only and off the accent, at the far end of
+         * the row from Previous: the three controls to its left rearrange what
+         * is playing, and this is the one that takes the station away.
+         */}
+        <button
+          type="button"
+          aria-label="Stop playback"
+          title="Stop playback"
+          onClick={() => stop.run()}
+          disabled={stop.pending}
+          className={cn(
+            ICON_BUTTON,
+            "border-border bg-white/[0.06] text-muted-foreground hover:-translate-y-px hover:border-destructive/30 hover:bg-destructive/15 hover:text-destructive",
+          )}
+        >
+          {stop.pending ? (
+            <Loader2 aria-hidden className="size-[1.05rem] animate-spin" />
+          ) : (
+            <Square aria-hidden className="size-[1.05rem]" />
+          )}
+        </button>
       </div>
     </div>
   );
@@ -199,11 +226,17 @@ function Artwork({ src }: { src: string | null }) {
 }
 
 /**
- * Prev / Next.
+ * The geometry every square button in the row shares — Prev, Next and Stop.
  *
- * 44px on touch and on phones, 38px on a desktop pointer: these sit either side
- * of Stop, and a mis-tap here skips a song rather than doing nothing.
+ * 44px on touch and on phones, 38px on a desktop pointer: these sit either
+ * side of the wide button, and a mis-tap here skips a song or ends the session
+ * rather than doing nothing. Held in one place so the three cannot end up
+ * different sizes; the colours are each button's own business.
  */
+const ICON_BUTTON =
+  "flex size-11 shrink-0 cursor-pointer items-center justify-center rounded-[10px] border transition-all duration-200 min-[601px]:size-[38px] pointer-coarse:size-11 disabled:pointer-events-none disabled:opacity-35";
+
+/** Prev / Next. */
 function NavButton({
   label,
   icon: Icon,
@@ -225,8 +258,7 @@ function NavButton({
       disabled={disabled}
       onClick={onClick}
       className={cn(
-        "flex size-11 shrink-0 cursor-pointer items-center justify-center rounded-[10px] border transition-all duration-200 min-[601px]:size-[38px] pointer-coarse:size-11",
-        "disabled:pointer-events-none disabled:opacity-35",
+        ICON_BUTTON,
         live
           ? "border-ok/25 bg-ok/10 text-ok hover:-translate-y-px hover:bg-ok/20"
           : "border-border bg-white/[0.06] text-muted-foreground hover:-translate-y-px hover:bg-white/[0.12]",

@@ -16,6 +16,8 @@ import {
   canGoPrevious,
   currentArtwork,
   describeNowPlaying,
+  describeToggle,
+  playbackMode,
   trackArtwork,
 } from "@/lib/now-playing";
 
@@ -164,6 +166,74 @@ describe("describeNowPlaying", () => {
     for (const state of engaged) {
       assert.notEqual(describeNowPlaying(frame({ state }), "Kitchen").mode, "idle", state);
     }
+  });
+});
+
+describe("playbackMode", () => {
+  it("calls an audible speaker playing", () => {
+    assert.equal(playbackMode("PLAYING"), "playing");
+  });
+
+  it("calls a paused one paused", () => {
+    assert.equal(playbackMode("PAUSED_PLAYBACK"), "paused");
+  });
+
+  it("calls the gap between queue items playing", () => {
+    // Nothing is audible during TRANSITIONING, but Sonos reports it for a
+    // second or two on every track change, and treating it as anything else
+    // makes the card and the bar blink on every song.
+    assert.equal(playbackMode("TRANSITIONING"), "playing");
+  });
+
+  it("calls a stopped speaker idle", () => {
+    assert.equal(playbackMode("STOPPED"), "idle");
+  });
+
+  it("calls a speaker reporting nothing at all idle", () => {
+    // Before the first frame, and during a reconnect.
+    assert.equal(playbackMode(null), "idle");
+    assert.equal(playbackMode(undefined), "idle");
+  });
+
+  it("is the rule describeNowPlaying reports", () => {
+    // The whole reason this is exported: the card reads the mode off a view
+    // model, the play/pause button reads it off a raw frame, and a second copy
+    // of the mapping is how the two start disagreeing about what is paused.
+    const states: PlaybackState[] = ["PLAYING", "PAUSED_PLAYBACK", "TRANSITIONING", "STOPPED"];
+    for (const state of states) {
+      assert.equal(playbackMode(state), describeNowPlaying(frame({ state }), null).mode, state);
+    }
+  });
+});
+
+describe("describeToggle", () => {
+  it("offers Pause while the speaker is playing", () => {
+    assert.deepEqual(describeToggle("playing"), {
+      action: "pause",
+      label: "Pause",
+    });
+  });
+
+  it("offers Play once it is paused", () => {
+    assert.deepEqual(describeToggle("paused"), {
+      action: "play",
+      label: "Play",
+    });
+  });
+
+  it("offers nothing when idle", () => {
+    // `/api/stop` tears the station down, so a bare `play` here would walk
+    // whatever is left in the Sonos queue with no prefetch and no station
+    // behind it — a half-session that looks like the app lost its place.
+    // Starting playback is Play now's job.
+    assert.equal(describeToggle("idle"), null);
+  });
+
+  it("offers Pause through the gap between queue items", () => {
+    // `describeNowPlaying` reports TRANSITIONING as "playing", and the button
+    // must not flicker to Play for the second or two a track change takes.
+    assert.equal(describeToggle(describeNowPlaying(frame({ state: "TRANSITIONING" }), null).mode)
+      ?.action, "pause");
   });
 });
 

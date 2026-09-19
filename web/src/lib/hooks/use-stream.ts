@@ -8,9 +8,14 @@ import { useAction } from "@/lib/hooks/use-action";
 import { usePersistedState } from "@/lib/hooks/use-persisted-state";
 
 /**
- * The analyzed track survives a reload. Not a nicety: analysing costs a yt-dlp
- * round trip, and the common shape of using this app is to queue a song, go
- * back to whatever you were doing, and return to the tab later.
+ * A looked-up but not yet cast track survives a reload. Not a nicety:
+ * analysing costs a yt-dlp round trip, and this tab spends most of its life
+ * sitting in the background — so the gap between pressing Analyze and pressing
+ * Play is measured in however long it takes someone to come back to it, which
+ * is plenty of time for a browser restart.
+ *
+ * Only that gap. Casting clears the entry, so a restored tab offers the song
+ * you had not sent yet and never one you already did.
  */
 const ANALYZED_KEY = "yts.analyzed";
 
@@ -42,7 +47,11 @@ export interface StreamController {
   analyzing: boolean;
   analyzeError: ApiError | null;
 
-  /** The last successfully analyzed video, or null before the first one. */
+  /**
+   * The video waiting to be cast: null before the first lookup, and null again
+   * once one has been cast. It is what the Play buttons hang off, so this is
+   * also the answer to "is there anything to play right now".
+   */
   analyzed: AnalyzedVideo | null;
 
   autoplay: boolean;
@@ -64,13 +73,18 @@ export interface StreamController {
  * is in flight are all one edit away from being wrong in a way no screenshot
  * would show.
  *
- * `analyzed` is only ever written on success. The original set its
- * `selectedVideoUrl` from the input *before* the fetch and hid the info panel
- * for the duration, so a failed analysis left the previous track's card
- * pointing at the new URL — recoverable only because the card was hidden. A
- * pair written atomically means the panel and the buttons cannot disagree, so
- * the panel can stay up through a failure, which is also what the user wants:
- * a typo in the box should not cost them the song they already looked up.
+ * `analyzed` is the one piece of state both halves move, and each moves it
+ * only on success: a lookup writes it, a cast clears it. Nothing a failure
+ * touches, so a failed lookup and a failed cast both leave the last good
+ * track on screen — which is what the user wants, since neither a typo in the
+ * box nor an unreachable speaker should cost them the song they looked up.
+ *
+ * The original set its `selectedVideoUrl` from the input *before* the fetch
+ * and hid the info panel for the duration, so a failed analysis left the
+ * previous track's card pointing at the new URL — recoverable only because the
+ * card was hidden. Writing the URL and its metadata as one pair means the
+ * panel and the buttons cannot disagree, so the panel can stay up through a
+ * failure instead.
  */
 export function useStream(deviceIp: string | undefined): StreamController {
   const [url, setUrl] = useState("");
@@ -114,9 +128,17 @@ export function useStream(deviceIp: string | undefined): StreamController {
       autoplay,
       mode: castMode,
     });
-    // The box is free for the next URL now; the info panel above it stays put,
-    // so what was just sent is still on screen.
+    // The speaker has it, so the panel has nothing left to say: from here the
+    // Now Playing card is what describes what is playing, and a panel still
+    // showing this track beside it is a second answer to that question — one
+    // that stops being true the moment the station advances. Reset both and
+    // the controller is back to its one job, the next URL.
+    //
+    // After the await, so a cast that never reached the speaker leaves the
+    // song on screen rather than charging a second yt-dlp round trip to retry
+    // it.
     setUrl("");
+    setAnalyzed(null);
     return result;
   });
 
