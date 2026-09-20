@@ -69,6 +69,11 @@ class TestWalk(unittest.TestCase):
         random.seed(seed)
         # Ruling B: second arg is generation counter, not seed id.
         station = app.Station('10.0.0.1', 0)
+        # Every candidate pool is built from the anchor's neighbourhood, so a
+        # station without one has nothing to offer and `_pick_next` returns
+        # None on the first call. `start_station` sets it before the first
+        # `add` for the same reason; this mirrors that order.
+        station.anchor = SEED
         station.add({'id': SEED, 'title': 'Rick Astley - Never Gonna Give You Up',
                      'uploader': 'Rick Astley', 'duration': 213})
         # Ruling D: the seed is what the speaker is playing, so it is heard.
@@ -93,6 +98,40 @@ class TestWalk(unittest.TestCase):
                            'exhausted': station.exhausted,
                            'cap_lifted': cap_lifted})
         return station, picked
+
+    def test_every_fetch_is_the_anchor_or_one_of_its_own_mix(self):
+        """No mix is ever fetched for a track the walk itself picked.
+
+        This replaces three tests of `ANCHOR_REVISIT_PROB`, a probabilistic
+        escape hatch on a design that seeded each pick from the previous one.
+        It reseeded from the station's first track some fraction of the time,
+        so the strongest available property was "the walk *can* get back", and
+        those tests had to pin the probability at 1.0 and 0.0 to say anything
+        at all — they asserted about the hatch, not about the walk.
+
+        The property is now unconditional and can be asserted directly, with no
+        constant to hold still. Every pool is the anchor's own mix or the mix
+        of a track listed in it, which makes "seeded from whatever is currently
+        playing" not a tendency to bound but a fetch that must never happen.
+        """
+        asked = []
+
+        def recording_fetch(seed, refresh=False):
+            asked.append(seed)
+            return self._fetch(seed, refresh=refresh)
+
+        station, picked = self._walk(fetch=recording_fetch)
+        self.assertEqual(len(picked), 50, 'the walk stopped early')
+        self.assertEqual(asked[0], SEED, 'the first fetch is not the anchor')
+
+        radius1 = {e['id'] for e in self._fetch(SEED) if e.get('id')}
+        walked = {p['entry']['id'] for p in picked} - radius1 - {SEED}
+        self.assertTrue(walked, 'the walk never left radius 1; test is void')
+        for seed in asked:
+            self.assertNotIn(
+                seed, walked,
+                f"the mix of {seed} was fetched, but that track was reached by "
+                f"walking rather than from the anchor's own mix")
 
     def test_no_song_repeats(self):
         """No two picks share a SongMemory match, while not exhausted.
@@ -415,47 +454,6 @@ class TestArtistCooldown(unittest.TestCase):
             cooldown, [],
             f"ARTIST_COOLDOWN=-1 should produce [], got {cooldown}"
         )
-
-
-class TestReseedAnchor(unittest.TestCase):
-    """_reseed_ids must be able to reach back to where the walk started."""
-
-    def test_short_walk_never_anchors(self):
-        """Fewer than 10 plays: played_order[0] is still inside the normal
-        9-track window, so anchoring would just be indistinguishable noise —
-        it must not fire yet."""
-        old = app.ANCHOR_REVISIT_PROB
-        self.addCleanup(lambda: setattr(app, 'ANCHOR_REVISIT_PROB', old))
-        app.ANCHOR_REVISIT_PROB = 1.0  # would always anchor if it could
-
-        played = [f'v{i}' for i in range(9)]
-        seeds = app._reseed_ids(played)
-        self.assertNotIn('v0', seeds[1:])  # only via the normal window, if at all
-
-    def test_long_walk_can_anchor_to_original_seed(self):
-        """Past the 9-track window, ANCHOR_REVISIT_PROB=1 must always reseed
-        from played_order[0] — the track that actually started the station —
-        instead of a random recent one."""
-        old = app.ANCHOR_REVISIT_PROB
-        self.addCleanup(lambda: setattr(app, 'ANCHOR_REVISIT_PROB', old))
-        app.ANCHOR_REVISIT_PROB = 1.0
-
-        played = [f'v{i}' for i in range(20)]
-        seeds = app._reseed_ids(played)
-        self.assertEqual(seeds, ['v19', 'v0'])
-
-    def test_zero_prob_never_anchors(self):
-        """ANCHOR_REVISIT_PROB=0 must behave exactly like the old window-only
-        logic even on a long walk."""
-        old = app.ANCHOR_REVISIT_PROB
-        self.addCleanup(lambda: setattr(app, 'ANCHOR_REVISIT_PROB', old))
-        app.ANCHOR_REVISIT_PROB = 0.0
-
-        played = [f'v{i}' for i in range(20)]
-        for _ in range(20):
-            seeds = app._reseed_ids(played)
-            self.assertNotEqual(seeds[1], 'v0')
-            self.assertIn(seeds[1], played[-9:-1])
 
 
 if __name__ == '__main__':

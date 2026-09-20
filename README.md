@@ -253,17 +253,17 @@ this compose file. See "Changing the API address needs a rebuild" above.
 | MAX_TRACKS_PER_ARTIST | 2 | Cap on tracks one artist contributes per queue refill.  |
 | ARTIST_COOLDOWN | 4     | How many recently-heard artists are excluded from a       |
 |              |          | refill. They are dropped from it, not merely ranked last, |
-|              |          | so a mix that is all of them forces a wider reseed.       |
-| ANCHOR_REVISIT_PROB | 0.34 | Chance a reseed uses the track the station started   |
-|              |          | on instead of a random recent one, once the walk is long  |
-|              |          | enough for that to differ. The pull back toward the genre |
-|              |          | you picked; 0 disables it.                                |
-| STATION_PICK_POOL | 3   | Top candidates the next track is drawn from at random.    |
+|              |          | so a mix that is all of them forces the station to widen. |
+| ORBIT_MAX_EXPANSIONS | 12 | How far the station may widen from the song you    |
+|              |          | picked. Every candidate comes from that song's mix, or    |
+|              |          | from the mix of a track listed in it; this caps how many  |
+|              |          | of the latter it will fetch. Lower keeps a session closer |
+|              |          | to the seed and reaches the repeat floor sooner.          |
+| STATION_PICK_POOL | 8   | Top candidates the next track is drawn from at random.    |
 | HISTORY_TTL | 604800 | Seconds a heard song stays excluded (7 days).              |
 | HISTORY_MAX | 2000 | Cap on songs remembered across all stations.                |
 | HISTORY_QUEUED_TTL | 7200 | Seconds a queued but unheard song stays excluded (2 hours).|
 | HISTORY_FLUSH_INTERVAL | 60 | Seconds between history.json writes.                   |
-| SEEN_UNQUEUED_MAX | 300 | Songs a station remembers seeing but never queuing.      |
 | MIX_LIMIT | 50 | Tracks pulled from each radio mix.                            |
 | MIX_CACHE_MAX | 200 | Maximum mixes memoized.                                   |
 | EVENT_POLL_INTERVAL | 2 | Seconds between now-playing polls for the SSE stream.     |
