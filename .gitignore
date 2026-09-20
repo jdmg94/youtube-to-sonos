@@ -7,6 +7,8 @@ __pycache__
 *.pyo
 *.pyd
 .db
+.pytest_cache
+.superpowers
 
 # podman
 quadlet/*
@@ -17,3 +19,7 @@ cookies.txt
 # Downloaded audio cache
 cache/
 .DS_Store
+
+
+# Test data
+testdata/*
