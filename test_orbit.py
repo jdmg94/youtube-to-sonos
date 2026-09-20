@@ -111,6 +111,24 @@ def calibration_fetch(orbit, missed):
     return fetch
 
 
+def recording_fetch(orbit, supply):
+    """`strict_fetch`, plus a record of every id the walk was ever offered.
+
+    Assertion 4's denominator. Taken from the fetcher rather than read off the
+    station so that it does not name any attribute of either design — the same
+    number can be computed for the chain this replaced and for the orbit that
+    replaced it, which is the only way its threshold could be calibrated
+    against both.
+    """
+    inner = strict_fetch(orbit)
+
+    def fetch(seed, refresh=False):
+        entries = inner(seed, refresh=refresh)
+        supply.update(e['id'] for e in entries if e.get('id'))
+        return entries
+    return fetch
+
+
 def walk(orbit, fetch, n=WALK, rng=1234):
     """Drive `n` picks through the real ladder. Returns the picked entries."""
     app._HISTORY = songs.SongMemory(ttl=app.HISTORY_TTL,
@@ -224,32 +242,47 @@ class OrbitTestCase(unittest.TestCase):
 
     def test_the_dense_core_does_not_capture_the_walk(self):
         """Assertion 4: the core's share of picks is at most twice its share
-        of the orbit.
+        of the supply the walk was actually offered.
 
-        A ratio rather than an absolute: a core that genuinely is half the
-        orbit *should* be about half the picks. Capture means
+        A ratio rather than an absolute: a core that genuinely is half of what
+        was on offer *should* be about half the picks. Capture means
         over-representation relative to what was available, which is what a
-        walk with no restoring force produces and what a fixed orbit prevents.
+        walk with no restoring force produces.
 
-        This is the assertion that reproduces the bug report. Baseline over
-        25 RNG seeds is 4.8-6.4x (broad) and 6.0-8.3x (cluster) — the dense
-        core is 7-9% of the orbit and takes 52% of the picks, in both
-        corpora, on every run. 2x leaves a factor of 2.4 below the *best*
-        baseline run, so it is a line about behaviour and not about the seed.
+        **The denominator is the supply, not the orbit, and the first version
+        of this test got that wrong in a way that made it unsatisfiable.** It
+        divided by the core's share of all ~600 radius-2 ids. But the core is
+        44% of radius 1 (broad) and 58% (cluster), so a walk that is exactly
+        70% radius 1 and otherwise picks *uniformly at random* scores 3.7x and
+        5.9x on that denominator. Assertion 2 requires that walk. The two
+        assertions could not both hold, and the orbit denominator was the one
+        that was wrong: it measures "did the walk stay near the seed", which
+        is assertion 2's job and this design's whole premise, and it charges
+        the design for succeeding at it.
+
+        Dividing by what the station was handed asks the question that still
+        has teeth — given what was in front of it, did the walk pool in the
+        hubs? — and it still separates the designs. Over 100 RNG seeds per
+        corpus: the chain this replaced scores 2.4-3.7x (broad) and 2.8-6.6x
+        (cluster); this design scores 0.9-1.8x and 1.1-1.7x. 2x is above all
+        200 runs of the new code and below all 200 of the old. (The old
+        numbers come from `calibration_fetch`, since that code leaves the
+        orbit and `strict_fetch` would stop it at the first pick.)
         """
+        supply = set()
+        station, picked = walk(self.orbit, recording_fetch(self.orbit, supply))
         core = self.orbit.core()
-        available = len(core) / len(self.orbit.all_ids)
-        station, picked = walk(self.orbit, strict_fetch(self.orbit))
+        available = len(core & supply) / len(supply)
         taken = sum(1 for e in picked if e['id'] in core) / len(picked)
         self.assertLessEqual(
             taken, 2 * available,
-            f"the dense core is {available:.0%} of the orbit but took "
-            f"{taken:.0%} of the picks")
+            f"the dense core is {available:.0%} of the {len(supply)} ids the "
+            f"walk was offered but took {taken:.0%} of the picks")
 
     # --- the defect that four fixes missed ----------------------------------
 
-    def test_a_non_primary_pool_is_reachable_by_choose(self):
-        """A second pool's tracks must be able to win a pick.
+    def test_pools_contribute_at_a_rate_not_in_sequence(self):
+        """A pool's k-th track lands near queue position n*k, for n pools.
 
         `_choose` samples `queue[:STATION_PICK_POOL]`, and
         `build_station_queue` preserves the order of `entries` — so a pool
@@ -258,27 +291,44 @@ class OrbitTestCase(unittest.TestCase):
         sampled window in 3 of 132 mix pairs, putting the anchor's real
         influence near 0.77%.
 
-        This asserts on queue *position*, which is the thing that was broken.
-        `test_station.py`'s anchor test asserts the seeding function returns
-        the anchor, and passed throughout.
+        The obvious assertion — "some track unique to pool 2 is inside the
+        sampled window" — is wrong, and its failure is what produced this
+        wording. The broad seed's two mixes share 39 of 50 tracks, so pool 2's
+        genuinely-novel tracks are a late tail *inside pool 2 itself* (the
+        first is its 10th entry). That assertion cannot tell "pool 2 is
+        unreachable" from "pool 2 mostly agrees with pool 1", and it fails on
+        a correct interleave for the second reason.
+
+        Indexing the bound on the track's rank *within its own pool* separates
+        them: it asks whether a pool contributes at a rate proportional to the
+        number of pools, which is the property, rather than whether YouTube
+        happened to order that pool's novelty early. Measured: the first
+        pool-2-unique track sits at rank 9 (broad) and rank 0 (cluster), so
+        the bounds are 20 and 2; concatenation puts it at 47 and 43,
+        interleaving at 11 and 1.
+
+        It goes through `app._candidate_queue` rather than calling
+        `songs.build_station_queue` on a concatenation, because the fix lives
+        in the seam between them. Asserting on a hand-built concatenation would
+        test the bug rather than the code.
         """
         ids = [v for v in self.orbit.radius1 if v != self.orbit.seed]
-        first, second = self.orbit.mixes[ids[0]], self.orbit.mixes[ids[1]]
-        first_ids = {e['id'] for e in first}
-        only_second = {e['id'] for e in second} - first_ids
+        pools = [self.orbit.mixes[ids[0]], self.orbit.mixes[ids[1]]]
+        only_second = {e['id'] for e in pools[1]} - {e['id'] for e in pools[0]}
         self.assertTrue(only_second, 'fixture mixes are identical')
+        rank = next(i for i, e in enumerate(pools[1])
+                    if e['id'] in only_second)
+        bound = len(pools) * (rank + 1)
 
-        queue = songs.build_station_queue(
-            list(first) + list(second),
-            [songs.SongMemory(ttl=None, queued_ttl=None, max_songs=None)],
-            max_per_artist=app.MAX_TRACKS_PER_ARTIST)
-        window = queue[:app.STATION_PICK_POOL]
-        self.assertTrue(
-            any(e['id'] in only_second for e in window),
-            f"no track unique to the second pool is within the sampled "
-            f"window of {app.STATION_PICK_POOL}; the first unique one is at "
-            f"position "
-            f"{next(i for i, e in enumerate(queue) if e['id'] in only_second)}")
+        queue = app._candidate_queue(
+            None, [list(p) for p in pools],
+            [songs.SongMemory(ttl=None, queued_ttl=None, max_songs=None)])
+        at = next(i for i, e in enumerate(queue) if e['id'] in only_second)
+        self.assertLessEqual(
+            at, bound,
+            f"the second pool's first unheard-elsewhere track is its entry "
+            f"#{rank}, so with {len(pools)} pools it should reach position "
+            f"{bound}; it is at {at}")
 
 
 class TestBroadSeed(OrbitTestCase):

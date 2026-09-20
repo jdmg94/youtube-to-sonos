@@ -406,21 +406,26 @@ def _yt_error_response(err, context):
 #                           is why replaying a song rebuilt the identical queue:
 #                           the mix is cached, the filters are deterministic, so
 #                           always taking the best candidate walks the same path
-#                           every time. A small pool keeps relevance (the
-#                           round-robin has already spread the artists) while
-#                           making two runs from one seed diverge.
+#                           every time. A pool keeps relevance (the round-robin
+#                           has already spread the artists) while making two runs
+#                           from one seed diverge.
+#
+# STATION_PICK_POOL is 8 rather than the 3 it was while the station reseeded
+# from its own last pick. Under that design a random pick *changed the next
+# candidate pool*, so pool size and drift were one dial: widening it to get
+# variety made the walk wander, and narrowing it to stay near the seed made two
+# sessions from one seed identical. A fixed orbit decouples them — the pool for
+# pick N+1 is the same whatever won pick N — so this can be set for variety
+# alone, and drift is bounded by the orbit instead.
 MAX_TRACKS_PER_ARTIST = int(os.environ.get('MAX_TRACKS_PER_ARTIST', 2))
 ARTIST_COOLDOWN = int(os.environ.get('ARTIST_COOLDOWN', 4))
-STATION_PICK_POOL = max(1, int(os.environ.get('STATION_PICK_POOL', 3)))
-# Reseeding normally draws from this station's own recent walk only
-# (`_reseed_ids`), which has no way back to where the walk started — so a
-# session that drifts into a dense, self-reinforcing cluster (a viral
-# sub-genre whose RD mixes are mostly each other) never drifts back out on
-# its own. With this probability, once the walk is long enough that the
-# original seed has scrolled out of the recent window, a reseed uses that
-# original seed instead of a random recent track — a periodic pull back
-# toward the genre the listener actually picked.
-ANCHOR_REVISIT_PROB = float(os.environ.get('ANCHOR_REVISIT_PROB', 0.34))
+STATION_PICK_POOL = max(1, int(os.environ.get('STATION_PICK_POOL', 8)))
+# How many radius-2 expansions a station may accumulate. Each one is the RD mix
+# of a track drawn from the anchor's own mix, so the orbit stays within two hops
+# of what the listener picked however long the session runs. The cap is on
+# *memory*, not on drift: 12 expansions is ~600 candidate tracks, far more than
+# a session consumes, and every one of them is still radius 2.
+ORBIT_MAX_EXPANSIONS = int(os.environ.get('ORBIT_MAX_EXPANSIONS', 12))
 # How long a song stays "already heard", and how many are remembered. Seven
 # days is the span over which a listener notices a repeat; the cap is what
 # stops the file and the match cost growing without bound on a box that never
@@ -432,10 +437,6 @@ HISTORY_MAX = int(os.environ.get('HISTORY_MAX', 2000))
 HISTORY_QUEUED_TTL = float(os.environ.get('HISTORY_QUEUED_TTL', 2 * 3600))
 # How often the history is written to disk, at most.
 HISTORY_FLUSH_INTERVAL = float(os.environ.get('HISTORY_FLUSH_INTERVAL', 60))
-# How many songs a station remembers seeing but never queuing, for ladder
-# rung 3 — a seed pool that costs nothing to collect and is by construction
-# made of songs we have not played.
-SEEN_UNQUEUED_MAX = int(os.environ.get('SEEN_UNQUEUED_MAX', 300))
 
 # --- Local audio cache -------------------------------------------------------
 # Songs are downloaded and transcoded to disk ahead of playback, and Sonos pulls
@@ -664,37 +665,6 @@ def get_radio_mix(video_id, limit=None, refresh=False):
         else:
             logger.error(f"Failed to fetch radio mix for {video_id}: {e}")
         return []
-
-def _reseed_ids(played_order):
-    """Pick which recently-played tracks to reseed the autoplay mix from.
-
-    Uses the most recent track plus one drawn at random from a little further
-    back, so the candidate pool blends 'related to what's playing now' with a
-    different point in the walk — this is the main lever against orbiting one
-    artist. The second seed is random rather than a fixed offset because a fixed
-    one makes the whole walk reproducible: same seed, same mix, same queue.
-
-    Both seeds are still drawn from the walk itself, though, which is exactly
-    what lets a session drift and stay drifted: YouTube's own RD-mix graph has
-    dense, mutually-reinforcing clusters (a currently-viral sub-genre whose
-    mixes mostly point back into each other), and once any track pulls the
-    walk into one, every future seed is drawn from inside it — there is
-    nothing here that ever points back the other way. `played_order[0]` is
-    the track that actually started the station, so with probability
-    ANCHOR_REVISIT_PROB (once it's old enough to have left the 9-track
-    window `window` already draws from) it stands in for the random second
-    seed instead — a periodic reseed from where the listener started, not
-    just from wherever the walk has since wandered to."""
-    if not played_order:
-        return []
-    seeds = [played_order[-1]]
-    window = played_order[-9:-1]
-    if len(played_order) > 9 and random.random() < ANCHOR_REVISIT_PROB:
-        seeds.append(played_order[0])
-    elif window:
-        seeds.append(random.choice(window))
-    return seeds
-
 
 def _log_reject(entry, reason):
     """Report a candidate dropped by a fuzzy match.
@@ -1481,12 +1451,19 @@ class Station:
         # own queue must never repeat itself however long it runs, which is a
         # stronger rule than the 7-day one and needs its own set.
         self.memory = SongMemory(ttl=None, queued_ttl=None, max_songs=None)
-        self.played_order = []       # video_ids in queue order, for reseeding
         self.artist_history = []     # artist keys, most recent last
-        # Songs a mix offered that we did not queue — ladder rung 3's seed
-        # pool. An OrderedDict used as an ordered set, oldest first.
-        self.seen_unqueued = OrderedDict()
-        self.widen = 0               # ladder rung to try next; see _pick_next
+        # The track the listener picked. Set once by start_station and never
+        # reassigned: it is the definition of what this station *is*, and
+        # every candidate pool is built from its neighbourhood. The station
+        # that replaced this one seeded from its own last pick instead, which
+        # made it a depth-1 Markov chain over its own frontier with nothing
+        # pointing back to what the listener asked for.
+        self.anchor = None
+        # The fixed orbit: the anchor's own RD mix at [0], then the mix of
+        # each radius-2 expansion. Entries are held, not re-fetched — see
+        # _orbit_entries for why the list and not a list of ids.
+        self.orbit = []
+        self.expanded = set()        # radius-1 ids already expanded
         self.exhausted = False
         self.idle_polls = 0
         self.ticks = 0
@@ -1508,8 +1485,6 @@ class Station:
         self.memory.add(song)
         with _STATE_LOCK:
             _HISTORY.add(song)                 # heard=False: queued, not played
-        # A song we queued is no longer a song we passed over.
-        self.seen_unqueued.pop(vid, None)
         meta = {
             'video_id': vid,
             'title': entry.get('title'),
@@ -1522,59 +1497,115 @@ class Station:
             self.tracks.append(meta)
         else:
             self.tracks.insert(at, meta)
-        self.played_order.append(vid)
         self.artist_history.append(song.artist or vid)
         return meta
 
 
-def _choose(station, queue, entries):
-    """Take one from the top of the pool, and remember what we passed over.
+def _choose(station, queue):
+    """Take one at random from the top STATION_PICK_POOL of the pool.
 
-    The pick is random within STATION_PICK_POOL because a deterministic pick
-    makes the whole walk reproducible — same seed, same mix, same queue, which
-    is defect 5 in the spec.
+    Random rather than best-first because a deterministic pick makes the whole
+    walk reproducible — same seed, same mix, same queue every time.
 
-    Everything else the pool offered is recorded as seen-but-unqueued, which
-    costs a dict insert and gives rung 3 a seed pool made entirely of songs
-    this station has not played.
+    Under the previous design this randomness compounded: the pick became the
+    next call's seed, so one unlucky draw moved the entire future candidate
+    pool. It no longer does. The orbit is fixed, so the pool for the next pick
+    is the same whatever wins this one, and the only thing a wider pool buys is
+    variety. That is what makes STATION_PICK_POOL=8 safe where 3 was not.
     """
-    chosen = random.choice(queue[:STATION_PICK_POOL])
-    _record_unqueued(station, (e for e in queue if e is not chosen))
-    return chosen
+    return random.choice(queue[:STATION_PICK_POOL])
 
 
-def _record_unqueued(station, entries):
-    for e in entries:
-        vid = e.get('id')
-        if not vid:
-            continue
-        station.seen_unqueued[vid] = None
-        station.seen_unqueued.move_to_end(vid)
-    while len(station.seen_unqueued) > SEEN_UNQUEUED_MAX:
-        station.seen_unqueued.popitem(last=False)
+def _orbit_entries(station, fetch, refresh=False):
+    """Every candidate in this station's orbit, radius 1 first.
 
+    The anchor's own mix is fetched once and *kept*, not re-fetched per call.
+    Re-fetching would read through _MIX_CACHE, which is fine until the mix ages
+    past MIX_CACHE_TTL or is evicted by MIX_CACHE_MAX — and then a single tick
+    would pay one synchronous yt-dlp round trip per expansion, inside the
+    station loop, at the exact moment the speaker wants the next track. Holding
+    the entries makes the cost of a pick independent of the cache.
 
-def _widen_seed(station, rung, used):
-    """One more seed id for ladder rung `rung`, or None if there isn't one.
-
-    Rung 2 reaches further back into this station's own walk than _reseed_ids
-    does — _reseed_ids draws from the last 9 tracks (played_order[-1] plus one
-    from [-9:-1]), so [:-9] is the precise complement, everything _reseed_ids
-    cannot reach. A station that has been orbiting one sound for an hour is
-    reseeding from inside that orbit; an older track is a different
-    neighbourhood and it is one we know the listener accepted.
-
-    Rung 3 leaves the walk entirely: a song some mix offered that we never
-    queued. Its mix is by construction adjacent to this station's taste and by
-    construction not something we have played.
+    Returned as a list of pools rather than one flat list because position in
+    the concatenation decides position in the built queue; see _candidate_queue.
     """
-    if rung == 2:
-        pool = [v for v in station.played_order[:-9] if v not in used]
-        return random.choice(pool) if pool else None
-    if rung == 3:
-        pool = [v for v in station.seen_unqueued if v not in used]
-        return random.choice(pool) if pool else None
-    return None
+    if not station.orbit:
+        station.orbit.append(list(fetch(station.anchor, refresh=refresh)))
+    return station.orbit
+
+
+def _expand_orbit(station, fetch):
+    """Add one radius-2 pool: the mix of a track from the *anchor's* mix.
+
+    The seed is drawn from radius 1 — never from the walk. That is the whole
+    design in one line. Seeding from the walk is what let a station drift
+    without limit and, once inside a dense mutually-reinforcing cluster of the
+    RD graph, stay there: every future seed came from inside the cluster
+    because every future seed came from the walk, and the walk was in it.
+
+    Drawing from the anchor's mix instead makes drift bounded by construction.
+    Every candidate this station will ever offer is within two hops of the
+    track the listener picked, for any session length.
+
+    Returns True if the orbit grew. One fetch, because this runs synchronously
+    inside the station loop.
+    """
+    # orbit[0] is the anchor's own mix, so the expansions are len(orbit) - 1.
+    if len(station.orbit) - 1 >= ORBIT_MAX_EXPANSIONS:
+        return False
+    radius1 = [e.get('id') for e in station.orbit[0] if e.get('id')]
+    pool = [v for v in radius1 if v not in station.expanded and v != station.anchor]
+    if not pool:
+        return False
+    seed = random.choice(pool)
+    station.expanded.add(seed)
+    entries = list(fetch(seed))
+    if not entries:
+        return False
+    station.orbit.append(entries)
+    logger.info(f"Station {station.device_ip}: orbit widened to "
+                f"{len(station.orbit)} mixes (radius-2 seed {seed})")
+    return True
+
+
+def _interleave(pools):
+    """Flatten pools round-robin, so no pool is stuck behind another.
+
+    This is load-bearing, and its absence was a silent defect for four
+    attempted fixes. `build_station_queue` preserves the order of what it is
+    given, and `_choose` samples only the first STATION_PICK_POOL of the
+    result — so a pool concatenated second lands behind every artist of the
+    first and can never win a pick. Measured on the real captured corpus, the
+    first track unique to a second mix sat at queue position 47 (broad seed)
+    and 43 (cluster seed), against a sampling window of 3.
+
+    That is why the previous fix — reseeding from the original track with
+    probability ANCHOR_REVISIT_PROB — did nothing: the anchor's mix was
+    appended second, so its tracks were unreachable whenever it fired. The
+    anchor influenced roughly 0.77% of picks while appearing to be a third of
+    them.
+
+    Round-robin rather than shuffling, because order within a pool is YouTube's
+    own relevance ranking and worth keeping.
+    """
+    out = []
+    for row in itertools.zip_longest(*pools):
+        out.extend(e for e in row if e is not None)
+    return out
+
+
+def _candidate_queue(station, pools, memories, cooldown=(), cap=None):
+    """The ranked candidate list for one rung of the ladder.
+
+    The single seam where pools become a queue, so the interleave can't be
+    forgotten by one caller and applied by another.
+    """
+    entries = _interleave(pools)
+    return build_station_queue(
+        entries, memories,
+        cooldown_artists=cooldown,
+        max_per_artist=cap if cap is not None else MAX_TRACKS_PER_ARTIST,
+        on_reject=_log_reject)
 
 
 def _cooldown_artists(station):
@@ -1640,71 +1671,66 @@ def _pick_next(station, refresh=False, fetch=None):
     `fetch` is the mix fetcher, defaulting to get_radio_mix. Injected so the
     walk simulation in Task 10 can drive the whole ladder from fixtures.
 
-    Returns None only when station.played_order is empty — with the oldest-
-    first floor at rung 6, a station with any history always has something to
-    play. Sets station.exhausted when it had to use that floor.
+    Returns None only when the station has no anchor — with the oldest-first
+    floor at rung 5, a station with any history always has something to play.
+    Sets station.exhausted when it had to use that floor.
+
+    Every rung draws from the same fixed orbit: the anchor's RD mix, plus the
+    RD mix of tracks drawn from *that* mix. Nothing here reads the walk, which
+    is the entire point. The ladder widens the orbit before it relaxes a rule,
+    and relaxes the rule that costs the listener least before the one that
+    costs most.
     """
     fetch = fetch or get_radio_mix
-    if not station.played_order:
+    if not station.anchor:
         return None
 
-    seeds = _reseed_ids(station.played_order)
     cooldown = _cooldown_artists(station)
-    entries = []
-    for seed in seeds:
-        entries.extend(fetch(seed, refresh=refresh))
+    pools = _orbit_entries(station, fetch, refresh=refresh)
 
-    # Rung 1: the normal path, no extra fetch.
+    # Rung 1: the normal path. No fetch at all once the orbit is warm.
     with _STATE_LOCK:
-        queue = build_station_queue(entries, [station.memory, _HISTORY],
-                                    cooldown_artists=cooldown,
-                                    max_per_artist=MAX_TRACKS_PER_ARTIST,
-                                    on_reject=_log_reject)
+        queue = _candidate_queue(station, pools, [station.memory, _HISTORY],
+                                 cooldown)
     if queue:
-        # Back to normal: forget that we ever had to widen, so the next lean
-        # patch starts from one fetch again.
-        station.widen = 0
         station.exhausted = False
-        return _choose(station, queue, entries)
+        return _choose(station, queue)
 
-    # Rung 2 or 3 — whichever `station.widen` points at, and only ONE of them.
-    # Each is a synchronous yt-dlp extraction (~2.6s) inside the station loop,
-    # and the Global Constraint is at most one extra fetch per call. A station
-    # that needs both climbs on the next tick, which costs seconds, not the
-    # tens of seconds a loop over both rungs would cost every tick.
-    rung = 2 + min(station.widen, 1)
-    station.widen += 1          # 0→2, 1→3, then 3 until rung 1 resets
-    extra = _widen_seed(station, rung, seeds)
-    if extra:
-        entries.extend(fetch(extra, refresh=refresh))
+    # Rung 2: widen the orbit by one radius-2 mix and retry with every filter
+    # still on. Exactly one fetch, because this is a synchronous yt-dlp
+    # extraction (~2.6s) inside the station loop; a station that needs two
+    # expansions gets the second on the next tick.
+    #
+    # This is deliberately the *first* thing tried. A station running out of
+    # unheard candidates has a supply problem, and more of the listener's own
+    # neighbourhood is a better answer to that than any relaxed rule below —
+    # all of which trade away something the listener can hear.
+    if _expand_orbit(station, fetch):
         with _STATE_LOCK:
-            queue = build_station_queue(entries, [station.memory, _HISTORY],
-                                        cooldown_artists=cooldown,
-                                        max_per_artist=MAX_TRACKS_PER_ARTIST,
-                                        on_reject=_log_reject)
+            queue = _candidate_queue(station, pools, [station.memory, _HISTORY],
+                                     cooldown)
         if queue:
             station.exhausted = False
-            return _choose(station, queue, entries)
+            return _choose(station, queue)
 
-    # Rung 4: drop the 7-day memory. The station's own list still holds, so
+    # Rung 3: drop the 7-day memory. The station's own list still holds, so
     # this repeats nothing within the session — only something from days ago.
-    queue = build_station_queue(entries, [station.memory],
-                                cooldown_artists=cooldown,
-                                max_per_artist=MAX_TRACKS_PER_ARTIST)
+    queue = _candidate_queue(station, pools, [station.memory], cooldown)
     if queue:
         station.exhausted = False
-        return _choose(station, queue, entries)
+        return _choose(station, queue)
 
-    # Rung 5: lift the artist cap and drop the artist cooldown — two songs by
+    # Rung 4: lift the artist cap and drop the artist cooldown — two songs by
     # one artist in a row is a much smaller harm than the same song twice.
-    queue = build_station_queue(entries, [station.memory],
-                                max_per_artist=len(entries) or 1)
+    flat = _interleave(pools)
+    queue = _candidate_queue(station, pools, [station.memory],
+                             cap=len(flat) or 1)
     if queue:
         logger.info(f"Station {station.device_ip}: artist cap lifted to refill")
         station.exhausted = False
-        return _choose(station, queue, entries)
+        return _choose(station, queue)
 
-    # Rung 6: the floor.
+    # Rung 5: the floor.
     return _reserve_oldest(station)
 
 
@@ -1987,6 +2013,11 @@ def start_station(device_ip, seed_meta):
     with _STATE_LOCK:
         _GENERATION += 1
         station = Station(device_ip, _GENERATION)
+        # The anchor is set BEFORE the seed is added, so no reader can ever see
+        # a station that has tracks but no definition of what it is. It is the
+        # only thing that decides what this station will offer, for its whole
+        # life: "songs like the one I picked", not "songs like the one playing".
+        station.anchor = seed_meta.get('video_id') or seed_meta.get('id')
         station.add(seed_meta)
         STATION[device_ip] = station
     return station
@@ -2127,21 +2158,26 @@ def refresh_station(coordinator, station):
         station.enqueued = min(station.enqueued, keep)
         station.exhausted = False
 
-        # Re-order `played_order` so its tail is what actually survived. It is
-        # only read by `_reseed_ids`, and its last entry is the primary seed —
-        # left alone, the refill would be built out of the radio mix of a track
-        # the listener has just thrown away. Discarded ids stay in the list (and
-        # in `played_ids`) so they remain excluded.
-        survivors = [m['video_id'] for m in station.tracks]
-        surviving = set(survivors)
-        station.played_order = [v for v in station.played_order
-                                if v not in surviving] + survivors
+        # Drop the held orbit so the refill re-fetches it. The anchor does not
+        # change — the listener asked for a different tail, not a different
+        # station — but the *held* entries have to go, because `_orbit_entries`
+        # only fetches when `station.orbit` is empty and would otherwise hand
+        # back the identical candidate list `refresh=True` exists to replace.
+        # `expanded` is cleared with it: leaving it would let the orbit rebuild
+        # to radius 1 only, permanently narrower than before the refresh.
+        #
+        # This replaced a rewrite of `played_order` whose job was to stop the
+        # refill being seeded from a track the listener had just thrown away.
+        # With a fixed orbit no refill is ever seeded from the walk, so the
+        # problem it solved cannot occur.
+        station.orbit = []
+        station.expanded = set()
 
         _discard_tracks(dropped)
 
         logger.info(f"Refreshing station on {station.device_ip}: dropped "
                     f"{len(dropped)} track(s) after position {cursor + 1}")
-        # refresh=True so the seeds' memoised radio mixes are re-fetched: a
+        # refresh=True so the anchor's memoised radio mix is re-fetched: a
         # brand-new set of songs can't come out of the same cached mix.
         _top_up(station, refresh=True)
 
