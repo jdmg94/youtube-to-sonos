@@ -2508,6 +2508,57 @@ def get_info():
     except Exception as e:
         return _yt_error_response(e, "metadata fetch")
 
+@app.route('/api/search', methods=['GET'])
+def search():
+    query = request.args.get('q', '').strip()
+    if not query:
+        return jsonify({'error': 'Missing query parameter'}), 400
+
+    limit = request.args.get('limit', '10')
+    try:
+        limit = max(1, min(20, int(limit)))
+    except ValueError:
+        limit = 10
+
+    search_url = f"ytsearch{limit}:{query}"
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts(extract_flat=True)) as ydl:
+            info = ydl.extract_info(search_url, download=False)
+
+        results = []
+        for entry in (info.get('entries') or []):
+            if not entry:
+                continue
+            results.append({
+                'id': entry.get('id'),
+                'title': entry.get('title'),
+                'uploader': entry.get('uploader') or entry.get('channel'),
+                'thumbnail': entry.get('thumbnail'),
+                'duration': entry.get('duration'),
+            })
+
+        return jsonify({'query': query, 'results': results})
+
+    except yt_dlp.utils.DownloadError as e:
+        error_msg = str(e)
+        response = {'error': error_msg}
+
+        if _is_bot_error(error_msg):
+            response['bot_detected'] = True
+            return jsonify(response), 429
+        elif _is_forbidden_error(error_msg):
+            response['forbidden'] = True
+            return jsonify(response), 502
+        elif _is_player_error(error_msg):
+            response['stale_extractor'] = True
+            return jsonify(response), 502
+        else:
+            return jsonify(response), 500
+    except Exception as e:
+        logger.exception("Search failed")
+        return jsonify({'error': str(e)}), 500
+
 def _video_id_from_url(url):
     """Video id from any YouTube URL form, without calling YouTube."""
     m = re.search(r'(?:v=|youtu\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})', url)
