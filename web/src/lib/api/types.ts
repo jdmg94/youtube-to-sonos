@@ -566,3 +566,20 @@ export function isAnalysisPending(
 ): body is HueAnalysisPending {
   return "status" in body;
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/search
+// ---------------------------------------------------------------------------
+
+export interface SearchResult {
+  id: string;
+  title: string | null;
+  uploader: string | null;
+  thumbnail: string | null;
+  duration: number | null;
+}
+
+export interface SearchResponse {
+  query: string;
+  results: SearchResult[];
+}
