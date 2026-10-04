@@ -2540,24 +2540,8 @@ def search():
 
         return jsonify({'query': query, 'results': results})
 
-    except yt_dlp.utils.DownloadError as e:
-        error_msg = str(e)
-        response = {'error': error_msg}
-
-        if _is_bot_error(error_msg):
-            response['bot_detected'] = True
-            return jsonify(response), 429
-        elif _is_forbidden_error(error_msg):
-            response['forbidden'] = True
-            return jsonify(response), 502
-        elif _is_player_error(error_msg):
-            response['stale_extractor'] = True
-            return jsonify(response), 502
-        else:
-            return jsonify(response), 500
     except Exception as e:
-        logger.exception("Search failed")
-        return jsonify({'error': str(e)}), 500
+        return _yt_error_response(e, "search")
 
 def _video_id_from_url(url):
     """Video id from any YouTube URL form, without calling YouTube."""
