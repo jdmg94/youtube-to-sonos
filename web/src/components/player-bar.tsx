@@ -70,8 +70,8 @@ export function PlayerBar({
         aria-expanded={expanded}
         aria-label={
           view.idle
-            ? `${view.title}. Open the player.`
-            : `${view.subtitle}: ${view.title}. Open the player.`
+            ? `${view.title}. Abrir el reproductor.`
+            : `${view.subtitle}: ${view.title}. Abrir el reproductor.`
         }
         className={cn(
           "-mx-2 flex min-w-0 grow items-center gap-3 rounded-xl px-2 text-left",

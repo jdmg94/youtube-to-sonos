@@ -163,7 +163,7 @@ export default function Home() {
               selected={selected}
               onSelect={(device) => {
                 select(device);
-                toast.success(`Selected speaker: ${device.name}`);
+                toast.success(`Altavoz seleccionado: ${device.name}`);
               }}
             />
           </Section>

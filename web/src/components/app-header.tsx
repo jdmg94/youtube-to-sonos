@@ -31,10 +31,10 @@ function describe({ count, scanning, failed }: DiscoveryStatus): {
   tone: "online" | "scanning" | "offline";
   text: string;
 } {
-  if (scanning) return { tone: "scanning", text: "Scanning…" };
-  if (failed) return { tone: "offline", text: "Scan failed" };
-  if (count === 0) return { tone: "offline", text: "No speakers" };
-  return { tone: "online", text: `${count} speaker${count === 1 ? "" : "s"}` };
+  if (scanning) return { tone: "scanning", text: "Escaneando…" };
+  if (failed) return { tone: "offline", text: "Escaneo fallido" };
+  if (count === 0) return { tone: "offline", text: "Sin altavoces" };
+  return { tone: "online", text: `${count} altav${count === 1 ? "oz" : "oces"}` };
 }
 
 export function AppHeader({ discovery }: { discovery: DiscoveryStatus }) {

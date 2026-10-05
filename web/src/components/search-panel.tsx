@@ -33,9 +33,9 @@ export function SearchPanel({ device, onNavigateToQueue }: SearchPanelProps) {
     const result = await search.cast(videoId, mode);
     if (result) {
       if (result.status === 'playing') {
-        toast.success(`Playing: ${result.title || 'Unknown track'}`);
+        toast.success(`Reproduciendo: ${result.title || 'Pista desconocida'}`);
       } else if (result.queued_next) {
-        toast.success(`Queued: ${result.title || 'Unknown track'}`);
+        toast.success(`En cola: ${result.title || 'Pista desconocida'}`);
       }
       onNavigateToQueue();
     }
@@ -45,7 +45,7 @@ export function SearchPanel({ device, onNavigateToQueue }: SearchPanelProps) {
     <div className="flex flex-col">
       <h2 className="mb-6 flex items-center gap-3 font-heading text-xl font-semibold">
         <Search aria-hidden className="size-5 text-brand" />
-        Search
+        Buscar
       </h2>
 
       <form
@@ -56,7 +56,7 @@ export function SearchPanel({ device, onNavigateToQueue }: SearchPanelProps) {
         }}
       >
         <label className="sr-only" htmlFor="search-query">
-          Search YouTube
+          Buscar en YouTube
         </label>
         <div className="relative grow">
           <Input
@@ -65,7 +65,7 @@ export function SearchPanel({ device, onNavigateToQueue }: SearchPanelProps) {
             type="text"
             value={search.query}
             onChange={(event) => search.setQuery(event.target.value)}
-            placeholder="Search YouTube (e.g. 'never gonna give you up')"
+            placeholder="Buscar en YouTube (ej. 'never gonna give you up')"
             autoComplete="off"
             spellCheck={false}
             className="h-auto w-full rounded-[14px] border-border bg-white/[0.05] px-5 py-4 pr-12 text-base transition-all duration-300 focus-visible:border-brand focus-visible:bg-white/[0.08] focus-visible:shadow-[0_0_15px_rgba(255,0,85,0.15)] focus-visible:ring-0 md:text-base"
@@ -78,7 +78,7 @@ export function SearchPanel({ device, onNavigateToQueue }: SearchPanelProps) {
                 inputRef.current?.focus();
               }}
               className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-white/[0.1] hover:text-foreground"
-              aria-label="Clear search"
+              aria-label="Limpiar búsqueda"
             >
               <X aria-hidden className="size-4" />
             </button>
@@ -98,7 +98,7 @@ export function SearchPanel({ device, onNavigateToQueue }: SearchPanelProps) {
           ) : (
             <Search aria-hidden className="size-4" />
           )}
-          Search
+          Buscar
         </button>
       </form>
 
@@ -145,8 +145,8 @@ function EmptyState({ query }: { query: string }) {
     <div className="flex flex-col items-center justify-center gap-4 rounded-[20px] border border-border bg-card p-12 text-center">
       <Search aria-hidden className="size-12 text-muted-foreground/50" />
       <div className="flex flex-col gap-2">
-        <p className="text-lg font-semibold">No results for &ldquo;{query}&rdquo;</p>
-        <p className="text-sm text-muted-foreground">Try a different search term</p>
+        <p className="text-lg font-semibold">Sin resultados para &ldquo;{query}&rdquo;</p>
+        <p className="text-sm text-muted-foreground">Intenta con otro término de búsqueda</p>
       </div>
     </div>
   );
@@ -221,10 +221,10 @@ function ResultCard({
       <div className="flex min-w-0 flex-1 flex-col gap-3">
         <div className="flex flex-col gap-1">
           <h3 className="line-clamp-2 font-heading text-base font-semibold leading-[1.4]">
-            {result.title || 'Unknown title'}
+            {result.title || 'Título desconocido'}
           </h3>
           <p className="text-sm text-muted-foreground">
-            {result.uploader || 'Unknown artist'}
+            {result.uploader || 'Artista desconocido'}
           </p>
         </div>
 
@@ -240,7 +240,7 @@ function ResultCard({
             type="button"
             onClick={() => onCast(result.id, 'now')}
             disabled={disabled}
-            title={disabled && !busy ? "Select a speaker first" : "Play now"}
+            title={disabled && !busy ? "Selecciona un altavoz primero" : "Reproducir ahora"}
             className={cn(
               "flex grow-[2] cursor-pointer items-center justify-center gap-2 rounded-[14px] px-4 py-2.5 text-sm font-semibold",
               "bg-gradient-to-br from-gold to-[#b29124] text-[#1a1408] shadow-[0_4px_15px_rgba(212,175,55,0.25)]",
@@ -253,14 +253,14 @@ function ResultCard({
             ) : (
               <Play aria-hidden className="size-4" />
             )}
-            {busy ? 'Casting…' : 'Play now'}
+            {busy ? 'Reproduciendo…' : 'Reproducir ahora'}
           </button>
 
           <button
             type="button"
             onClick={() => onCast(result.id, 'next')}
             disabled={disabled}
-            title={disabled && !busy ? "Select a speaker first" : "Play next"}
+            title={disabled && !busy ? "Selecciona un altavoz primero" : "Reproducir siguiente"}
             className={cn(
               "flex grow cursor-pointer items-center justify-center gap-2 rounded-[14px] border border-border bg-white/[0.08] px-4 py-2.5 text-sm font-semibold",
               "transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] hover:-translate-y-0.5 hover:bg-white/[0.15]",
@@ -272,7 +272,7 @@ function ResultCard({
             ) : (
               <Plus aria-hidden className="size-4" />
             )}
-            {busy ? 'Queueing…' : 'Play next'}
+            {busy ? 'Agregando…' : 'Reproducir siguiente'}
           </button>
         </div>
       </div>

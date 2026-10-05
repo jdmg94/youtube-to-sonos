@@ -70,7 +70,7 @@ describe("describeNowPlaying", () => {
     const view = describeNowPlaying(frame(), "Kitchen");
     assert.deepEqual(view, {
       mode: "playing",
-      label: "Now playing · Kitchen",
+      label: "Reproduciendo · Kitchen",
       title: "Rocket Man",
       device: "Kitchen",
     });
@@ -79,7 +79,7 @@ describe("describeNowPlaying", () => {
   it("distinguishes paused from playing", () => {
     const view = describeNowPlaying(frame({ state: "PAUSED_PLAYBACK" }), "Kitchen");
     assert.equal(view.mode, "paused");
-    assert.equal(view.label, "Paused · Kitchen");
+    assert.equal(view.label, "Pausado · Kitchen");
     // The track is still loaded and still what Play would resume, so it stays
     // on screen.
     assert.equal(view.title, "Rocket Man");
@@ -99,7 +99,7 @@ describe("describeNowPlaying", () => {
     const view = describeNowPlaying(frame({ state: "STOPPED" }), "Kitchen");
     assert.deepEqual(view, {
       mode: "idle",
-      label: "Idle · Kitchen",
+      label: "Inactivo · Kitchen",
       title: NO_TRACK,
       device: "Kitchen",
     });
@@ -112,7 +112,7 @@ describe("describeNowPlaying", () => {
     const view = describeNowPlaying(null, "Kitchen");
     assert.deepEqual(view, {
       mode: "idle",
-      label: "Idle · Kitchen",
+      label: "Inactivo · Kitchen",
       title: NO_TRACK,
       device: "Kitchen",
     });
@@ -132,12 +132,12 @@ describe("describeNowPlaying", () => {
     // These disagree for exactly one stream-teardown's worth of time after the
     // user switches rooms. The frame is the one describing audible sound.
     const view = describeNowPlaying(frame({ device: "Office" }), "Kitchen");
-    assert.equal(view.label, "Now playing · Office");
+    assert.equal(view.label, "Reproduciendo · Office");
   });
 
   it("drops the separator rather than trailing it when no name is known", () => {
     const view = describeNowPlaying(frame({ device: "" }), null);
-    assert.equal(view.label, "Now playing", "a dangling ' · ' reads as a truncated string");
+    assert.equal(view.label, "Reproduciendo", "a dangling ' · ' reads as a truncated string");
   });
 
   it("names an untitled track rather than leaving the row blank", () => {
@@ -210,14 +210,14 @@ describe("describeToggle", () => {
   it("offers Pause while the speaker is playing", () => {
     assert.deepEqual(describeToggle("playing"), {
       action: "pause",
-      label: "Pause",
+      label: "Pausar",
     });
   });
 
   it("offers Play once it is paused", () => {
     assert.deepEqual(describeToggle("paused"), {
       action: "play",
-      label: "Play",
+      label: "Reproducir",
     });
   });
 

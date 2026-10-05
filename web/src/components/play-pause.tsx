@@ -78,15 +78,15 @@ export function PlayPause({ device, state, variant, live = false }: PlayPausePro
    * blank or borrowing Stop's word: a disabled control still has to say what it
    * would do, and this one would start the track the card is not showing.
    */
-  const label = action?.label ?? "Play";
+  const label = action?.label ?? "Reproducir";
   const busy = toggle.pending;
   const Icon = busy ? Loader2 : action?.action === "pause" ? Pause : Play;
 
   return (
     <button
       type="button"
-      aria-label={`${label} playback`}
-      title={variant === "compact" ? `${label} playback` : undefined}
+      aria-label={`${label} reproducción`}
+      title={variant === "compact" ? `${label} reproducción` : undefined}
       onClick={() => void press()}
       disabled={!device || !action || busy || confirm.awaiting}
       className={cn(

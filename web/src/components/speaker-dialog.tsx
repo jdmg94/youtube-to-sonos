@@ -52,7 +52,7 @@ export function SpeakerDialog({
         // `aria-haspopup` is what tells a screen-reader user this reads as a
         // status but behaves as a menu.
         aria-haspopup="dialog"
-        title="Change speaker"
+        title="Cambiar altavoz"
         className={cn(
           "flex w-full cursor-pointer items-center gap-2.5 rounded-xl border px-4 py-2.5 text-left text-[0.9rem] transition-[background-color,border-color] duration-200",
           selected
@@ -66,10 +66,10 @@ export function SpeakerDialog({
         />
         {selected ? (
           <span className="min-w-0 truncate text-muted-foreground">
-            Controlling <span className="font-semibold text-foreground">{selected.name}</span>
+            Controlando <span className="font-semibold text-foreground">{selected.name}</span>
           </span>
         ) : (
-          <span className="text-muted-foreground">Select a speaker to start</span>
+          <span className="text-muted-foreground">Selecciona un altavoz para comenzar</span>
         )}
         <ChevronDown aria-hidden className="ml-auto size-3.5 shrink-0 text-muted-foreground" />
       </DialogTrigger>
@@ -112,7 +112,7 @@ export function SpeakerDialog({
         <DialogHeader className="mb-4 shrink-0 flex-row items-center justify-between gap-2 space-y-0">
           <DialogTitle className="flex items-center gap-2 font-display text-[1.15rem] font-semibold">
             <Disc3 aria-hidden className="size-5 text-gold" />
-            Speakers
+            Altavoces
           </DialogTitle>
           {/* Sits left of the dialog's own close button, which is absolutely
               positioned in the top-right corner. */}
@@ -121,8 +121,8 @@ export function SpeakerDialog({
             size="icon-sm"
             onClick={onRefresh}
             disabled={loading}
-            aria-label="Refresh speaker list"
-            title="Refresh speaker list"
+            aria-label="Actualizar lista de altavoces"
+            title="Actualizar lista de altavoces"
             className="mr-8 rounded-full text-muted-foreground"
           >
             <RotateCw className={cn(loading && "animate-spin")} />
@@ -130,7 +130,7 @@ export function SpeakerDialog({
         </DialogHeader>
 
         <DialogDescription className="sr-only">
-          Choose which Sonos speaker on your network this app controls.
+          Elige qué altavoz Sonos en tu red controlará esta aplicación.
         </DialogDescription>
 
         <div className="thin-scrollbar flex min-h-0 flex-col gap-2.5 overflow-y-auto pr-1.5">
@@ -181,18 +181,18 @@ function SpeakerList({
     return (
       <Empty>
         <Loader2 aria-hidden className="mr-2 inline size-4 animate-spin align-[-2px]" />
-        Scanning local network…
+        Escaneando red local…
       </Empty>
     );
   }
 
   if (error) {
-    return <Empty tone="error">Scan error: {error.message}</Empty>;
+    return <Empty tone="error">Error de escaneo: {error.message}</Empty>;
   }
 
   return (
     <Empty>
-      No Sonos speakers found. Ensure they are powered on and on the same LAN subnet.
+      No se encontraron altavoces Sonos. Asegúrate de que estén encendidos y en la misma subred de la red local.
     </Empty>
   );
 }

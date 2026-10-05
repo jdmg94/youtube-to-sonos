@@ -127,8 +127,8 @@ function StatusHeader({ hue, paired }: { hue: HueState; paired: boolean }) {
         size="icon-sm"
         onClick={paired ? hue.refresh : hue.discover}
         disabled={hue.scanning || hue.pairing}
-        aria-label={paired ? "Re-read bridge status" : "Scan for bridges"}
-        title={paired ? "Re-read bridge status" : "Scan for bridges"}
+        aria-label={paired ? "Releer estado del puente" : "Buscar puentes"}
+        title={paired ? "Releer estado del puente" : "Buscar puentes"}
         className="ml-auto shrink-0 rounded-full text-muted-foreground"
       >
         <RotateCw className={cn((hue.scanning || hue.loading) && "animate-spin")} />
@@ -152,13 +152,12 @@ function BridgeList({ hue }: { hue: HueState }) {
     return (
       <div className="flex flex-col items-center gap-3 rounded-xl border border-gold/20 bg-gold/[0.06] px-4 py-8 text-center">
         <Radio aria-hidden className="size-7 animate-pulse text-gold" />
-        <p className="text-[0.95rem] font-semibold">Press the button on your Hue bridge</p>
+        <p className="text-[0.95rem] font-semibold">Presiona el botón en tu puente Hue</p>
         <p className="max-w-[34ch] text-[0.82rem] text-muted-foreground">
-          The big round one on the top. This keeps asking for a minute, so there
-          is time to walk over.
+          El grande y redondo que está arriba. Esto sigue preguntando por un minuto, así que hay tiempo para ir caminando.
         </p>
         <Button variant="outline" size="sm" onClick={hue.cancelPair}>
-          Cancel
+          Cancelar
         </Button>
       </div>
     );
@@ -177,13 +176,12 @@ function BridgeList({ hue }: { hue: HueState }) {
       ) : hue.scanning ? (
         <Empty>
           <Loader2 aria-hidden className="mr-2 inline size-4 animate-spin align-[-2px]" />
-          Looking for a Hue bridge…
+          Buscando un puente Hue…
         </Empty>
       ) : (
         <div className="flex flex-col items-center gap-3 px-4 py-6 text-center">
           <p className="max-w-[36ch] text-[0.9rem] text-muted-foreground">
-            Pair a Hue bridge to let the lights follow what&rsquo;s playing. It
-            has to be powered on and on the same LAN subnet as this server.
+            Empareja un puente Hue para que las luces sigan lo que se reproduce. Debe estar encendido y en la misma subred de red local que este servidor.
           </p>
           {/* The panel's replacement for the dialog's scan-on-open — see the
               note on `LightsPanel`. It is the branch above that keeps a second
@@ -192,7 +190,7 @@ function BridgeList({ hue }: { hue: HueState }) {
               rather than a disabled one to wonder about. */}
           <Button variant="outline" size="sm" onClick={hue.discover}>
             <Radar aria-hidden />
-            Scan for bridges
+            Buscar puentes
           </Button>
         </div>
       )}
@@ -216,7 +214,7 @@ function BridgeCard({ bridge, onPair }: { bridge: HueBridge; onPair: () => void 
         <span className="truncate text-[0.95rem] font-semibold">{view.label}</span>
         <span className="truncate text-[0.78rem] text-muted-foreground">{view.detail}</span>
       </span>
-      <span className="ml-auto shrink-0 text-[0.8rem] font-medium text-gold">Pair</span>
+      <span className="ml-auto shrink-0 text-[0.8rem] font-medium text-gold">Emparejar</span>
     </button>
   );
 }
@@ -230,12 +228,11 @@ function AreaList({ hue }: { hue: HueState }) {
     return hue.areasLoading ? (
       <Empty>
         <Loader2 aria-hidden className="mr-2 inline size-4 animate-spin align-[-2px]" />
-        Reading entertainment areas…
+        Leyendo áreas de entretenimiento…
       </Empty>
     ) : (
       <Empty>
-        This bridge has no entertainment areas. Create one in the Philips Hue app
-        under Settings → Entertainment areas, then rescan.
+        Este puente no tiene áreas de entretenimiento. Crea una en la aplicación Philips Hue en Configuración → Áreas de entretenimiento, luego vuelve a escanear.
       </Empty>
     );
   }
@@ -284,7 +281,7 @@ function AreaCard({
       aria-pressed={active}
       disabled={disabled}
       onClick={onSelect}
-      title={hue.streaming && view.ready ? "Stop the lights to switch area" : undefined}
+      title={hue.streaming && view.ready ? "Detén las luces para cambiar de área" : undefined}
       className={cn(
         "flex items-center gap-3 rounded-xl border p-[0.7rem_0.85rem] text-left transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]",
         active
@@ -334,9 +331,9 @@ function LightSettings({ dials }: { dials: HueSettingsState }) {
 
   return (
     <div className="mt-0.5 flex flex-col gap-1 rounded-xl border border-border bg-card px-[0.85rem] py-2">
-      <Dial label="Brightness" value={settings.brightness} onChange={dials.setBrightness} />
-      <Dial label="Smoothing" value={settings.transition} onChange={dials.setTransition} />
-      <Dial label="Spread" value={settings.spread} onChange={dials.setSpread} />
+      <Dial label="Brillo" value={settings.brightness} onChange={dials.setBrightness} />
+      <Dial label="Suavizado" value={settings.transition} onChange={dials.setTransition} />
+      <Dial label="Dispersión" value={settings.spread} onChange={dials.setSpread} />
     </div>
   );
 }
@@ -405,10 +402,10 @@ const DIAL_CLASS = cn(
  * screen accounting for it.
  */
 const ANALYSIS_NOTE: Record<AnalysisStatus, string> = {
-  idle: "Waiting for a track",
-  analysing: "Analysing the track…",
-  ready: "Following the beat",
-  unavailable: "No analysis for this track — holding a warm glow",
+  idle: "Esperando una pista",
+  analysing: "Analizando la pista…",
+  ready: "Siguiendo el ritmo",
+  unavailable: "Sin análisis para esta pista — manteniendo un brillo cálido",
 };
 
 function StreamControls({
@@ -427,7 +424,7 @@ function StreamControls({
       <SwatchStrip colors={colors} streaming={hue.streaming} />
 
       <span className="min-w-0 flex-1 truncate text-[0.82rem] text-muted-foreground">
-        {hue.streaming ? ANALYSIS_NOTE[status] : "Lights are not following"}
+        {hue.streaming ? ANALYSIS_NOTE[status] : "Las luces no están siguiendo"}
       </span>
 
       <Button
@@ -440,7 +437,7 @@ function StreamControls({
         disabled={hue.busy || (!hue.streaming && !ready)}
       >
         {hue.busy && <Loader2 aria-hidden className="animate-spin" />}
-        {hue.streaming ? "Stop" : "Start"}
+        {hue.streaming ? "Detener" : "Iniciar"}
       </Button>
     </div>
   );
