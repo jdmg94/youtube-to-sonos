@@ -36,7 +36,7 @@ export function Timeline({ position, duration }: TimelineProps) {
   const progress = Math.min((positionSeconds / durationSeconds) * 100, 100);
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div role="timer" aria-label="Posición de reproducción" className="flex flex-col gap-1.5">
       {/* Progress bar */}
       <div className="h-1 w-full overflow-hidden rounded-full bg-white/[0.1]">
         <div
