@@ -61,6 +61,11 @@ export function useSearch(deviceIp: string | null) {
     }
   }
 
+  function clear() {
+    setQuery('');
+    setResults([]);
+  }
+
   return {
     query,
     setQuery,
@@ -73,5 +78,6 @@ export function useSearch(deviceIp: string | null) {
     cast,
     autoplay,
     setAutoplay,
+    clear,
   };
 }
