@@ -205,7 +205,7 @@ function ResultCard({
     <div className="flex flex-col gap-4 rounded-[20px] border border-border bg-card p-4 transition-all duration-300 hover:border-brand/30 min-[601px]:flex-row">
       <div className="relative aspect-video w-full shrink-0 overflow-hidden rounded-xl border border-border shadow-[0_4px_12px_rgba(0,0,0,0.3)] min-[601px]:w-[120px]">
         {result.thumbnail ? (
-          // eslint-disable-next-line @next/next/no-img-element -- YouTube CDN thumbnails, not optimizable
+          // eslint-disable-next-line lint/performance/noImgElement -- YouTube CDN thumbnails, not optimizable
           <img
             src={result.thumbnail}
             alt=""
