@@ -5,6 +5,7 @@ import { toast } from "sonner";
 
 import { Equalizer } from "@/components/equalizer";
 import { PlayPause } from "@/components/play-pause";
+import { Timeline } from "@/components/timeline";
 import { api } from "@/lib/api/client";
 import type { Device, NowPlaying, StationBody } from "@/lib/api/types";
 import { useAction } from "@/lib/hooks/use-action";
@@ -98,6 +99,8 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
        * not jump by a fifth of its size the moment the station frame lands.
        */}
       {view.mode !== "idle" && <Artwork src={artwork} />}
+
+      <Timeline position={nowPlaying?.position ?? null} duration={nowPlaying?.duration ?? null} />
 
       <div className="flex min-w-0 items-center gap-[0.85rem]">
         <span
