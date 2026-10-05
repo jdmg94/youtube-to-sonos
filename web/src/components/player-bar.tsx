@@ -4,6 +4,7 @@ import { Music } from "lucide-react";
 
 import { Equalizer } from "@/components/equalizer";
 import { PlayPause } from "@/components/play-pause";
+import { Timeline } from "@/components/timeline";
 import type { Device, NowPlaying } from "@/lib/api/types";
 import type { PlayerBarView } from "@/lib/shell";
 import { cn } from "@/lib/utils";
@@ -49,6 +50,7 @@ export function PlayerBar({
   view: PlayerBarView;
   /** Passed through to `PlayPause`, which sends the command itself. */
   device: Device | null;
+  /** Now-playing data for the timeline. */
   nowPlaying: NowPlaying | null;
   /** The sheet this opens is showing, so the row is a redundant summary of it. */
   expanded: boolean;
@@ -57,13 +59,14 @@ export function PlayerBar({
   return (
     <div
       className={cn(
-        "glass-bar fixed inset-x-0 z-30 flex items-center gap-3 px-4 min-[901px]:hidden",
+        "glass-bar fixed inset-x-0 z-30 flex flex-col gap-2 px-4 py-2 min-[901px]:hidden",
         // Sits directly on top of the tab bar, which is itself lifted by the
         // home indicator — so this has to clear both or it renders behind it.
-        "bottom-[calc(var(--tab-bar)+env(safe-area-inset-bottom))] h-[var(--player-bar)]",
+        "bottom-[calc(var(--tab-bar)+env(safe-area-inset-bottom))] min-h-[var(--player-bar)]",
       )}
     >
-      <button
+      <div className="flex items-center gap-3">
+        <button
         type="button"
         onClick={onOpen}
         aria-haspopup="dialog"
@@ -123,7 +126,10 @@ export function PlayerBar({
        * button would be the loudest thing on a phone screen for information
        * the row has given twice already.
        */}
-      <PlayPause device={device} state={nowPlaying?.state} variant="compact" />
+        <PlayPause device={device} state={nowPlaying?.state} variant="compact" />
+      </div>
+
+      <Timeline position={nowPlaying?.position ?? null} duration={nowPlaying?.duration ?? null} />
     </div>
   );
 }
