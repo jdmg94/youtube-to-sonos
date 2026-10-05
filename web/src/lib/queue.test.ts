@@ -197,9 +197,9 @@ describe("describeQueue", () => {
     // Blank for `ready` on purpose: it is the state almost every row is in, and
     // a badge on all of them hides the two that matter.
     assert.equal(rows[0].statusLabel, "");
-    assert.equal(rows[1].statusLabel, "downloading…");
-    assert.equal(rows[2].statusLabel, "queued");
-    assert.equal(rows[3].statusLabel, "unavailable");
+    assert.equal(rows[1].statusLabel, "descargando…");
+    assert.equal(rows[2].statusLabel, "en cola");
+    assert.equal(rows[3].statusLabel, "no disponible");
   });
 
   it("calls an enqueued track jumpable even after its audio was evicted", () => {
@@ -355,7 +355,7 @@ describe("describeRemove", () => {
     const list = station({ index: 1, tracks: [track(), track(), track()] });
     assert.deepEqual(describeRemove(list, 1), {
       ok: false,
-      message: "That track is already playing",
+      message: "Esa pista ya se está reproduciendo",
     });
   });
 
@@ -366,7 +366,7 @@ describe("describeRemove", () => {
 
   it("refuses an index the station no longer has", () => {
     const decision = describeRemove(station({ tracks: [track()] }), 7);
-    assert.deepEqual(decision, { ok: false, message: "That track is no longer queued" });
+    assert.deepEqual(decision, { ok: false, message: "Esa pista ya no está en cola" });
   });
 
   it("refuses a negative index", () => {
@@ -487,7 +487,7 @@ describe("describeJump", () => {
       station({ tracks: [track({ cached: "running", queue_pos: null })] }),
       0,
     );
-    assert.deepEqual(decision, { ok: false, message: "That track is still downloading" });
+    assert.deepEqual(decision, { ok: false, message: "Esa pista aún se está descargando" });
   });
 
   it("tells the listener not to wait for one that failed", () => {
@@ -497,7 +497,7 @@ describe("describeJump", () => {
       station({ tracks: [track({ cached: "failed", queue_pos: null })] }),
       0,
     );
-    assert.deepEqual(decision, { ok: false, message: "That track couldn't be downloaded" });
+    assert.deepEqual(decision, { ok: false, message: "Esa pista no se pudo descargar" });
   });
 
   it("refuses an index the station no longer has", () => {
@@ -505,7 +505,7 @@ describe("describeJump", () => {
     // replaced wholesale on every SSE frame.
     const decision = describeJump(station({ tracks: [track()] }), 7);
     assert.equal(decision.ok, false);
-    assert.equal(decision.ok === false && decision.message, "That track is no longer queued");
+    assert.equal(decision.ok === false && decision.message, "Esa pista ya no está en cola");
   });
 
   it("refuses when there is no station at all", () => {
@@ -555,14 +555,14 @@ describe("canRefresh", () => {
 
 describe("describeRefresh", () => {
   it("reports what was replaced, in the right number", () => {
-    assert.equal(describeRefresh(1), "Queue refreshed — 1 track replaced");
-    assert.equal(describeRefresh(7), "Queue refreshed — 7 tracks replaced");
+    assert.equal(describeRefresh(1), "Cola actualizada — 1 pista reemplazada");
+    assert.equal(describeRefresh(7), "Cola actualizada — 7 pistas reemplazadas");
   });
 
   it("pluralises zero as a plural", () => {
     // The server can legitimately drop nothing and still succeed. "0 track"
     // is the one the original's "track(s)" was hiding.
-    assert.equal(describeRefresh(0), "Queue refreshed — 0 tracks replaced");
+    assert.equal(describeRefresh(0), "Cola actualizada — 0 pistas reemplazadas");
   });
 });
 
@@ -580,13 +580,13 @@ describe("the words the user actually reads", () => {
   });
 
   it("calls an unnamed track Untitled", () => {
-    assert.equal(UNTITLED, "Untitled");
+    assert.equal(UNTITLED, "Sin título");
   });
 
   it("says nothing is queued rather than reporting an error", () => {
     // An empty station is the normal state before the first play, not a
     // failure to load.
-    assert.equal(NO_TRACKS, "No tracks queued yet");
+    assert.equal(NO_TRACKS, "Aún no hay pistas en cola");
   });
 });
 

@@ -12,17 +12,17 @@
 import { isJumpable, type CacheState, type StationBody, type StationTrack } from "@/lib/api/types";
 
 /** Shown in place of the list when the speaker has no station. */
-export const NO_TRACKS = "No tracks queued yet";
+export const NO_TRACKS = "Aún no hay pistas en cola";
 
 /** A track yt-dlp resolved but could not name. */
-export const UNTITLED = "Untitled";
+export const UNTITLED = "Sin título";
 
 /** A track with no channel. Not "Unknown" — every one of these is from YouTube. */
 export const UNKNOWN_UPLOADER = "YouTube";
 
 /** Shown when the station has run out of new songs and is replaying old ones. */
 export const EXHAUSTED =
-  "Out of new songs for this station — replaying ones you've heard, oldest first.";
+  "Se acabaron las canciones nuevas para esta estación — reproduciendo las que ya escuchaste, empezando por las más antiguas.";
 
 /**
  * A track's download state, reduced to what the row actually distinguishes.
@@ -45,9 +45,9 @@ export type TrackStatus = "ready" | "downloading" | "waiting" | "unavailable";
  */
 const STATUS_LABEL: Record<TrackStatus, string> = {
   ready: "",
-  downloading: "downloading…",
-  waiting: "queued",
-  unavailable: "unavailable",
+  downloading: "descargando…",
+  waiting: "en cola",
+  unavailable: "no disponible",
 };
 
 export function trackStatus(cached: CacheState): TrackStatus {
@@ -269,15 +269,15 @@ export function describeJump(
   // DOM dataset in the harness and from a stale render in the app: the station
   // is replaced wholesale on every SSE frame, so a click can land against a
   // list that has since shrunk.
-  if (!track) return { ok: false, message: "That track is no longer queued" };
+  if (!track) return { ok: false, message: "Esa pista ya no está en cola" };
 
   if (!isJumpable(track)) {
     return {
       ok: false,
       message:
         track.cached === "failed"
-          ? "That track couldn't be downloaded"
-          : "That track is still downloading",
+          ? "Esa pista no se pudo descargar"
+          : "Esa pista aún se está descargando",
     };
   }
   return { ok: true, index };
@@ -312,8 +312,8 @@ export function canRefresh(
  * is read.
  */
 export function describeRefresh(dropped: number): string {
-  const plural = dropped === 1 ? "track" : "tracks";
-  return `Queue refreshed — ${dropped} ${plural} replaced`;
+  const plural = dropped === 1 ? "pista" : "pistas";
+  return `Cola actualizada — ${dropped} ${plural} reemplazada${dropped === 1 ? "" : "s"}`;
 }
 
 export type RemoveDecision =
@@ -340,11 +340,11 @@ export function describeRemove(
   index: number,
 ): RemoveDecision {
   const track = index >= 0 ? station?.tracks[index] : undefined;
-  if (!track) return { ok: false, message: "That track is no longer queued" };
+  if (!track) return { ok: false, message: "Esa pista ya no está en cola" };
   // Removing at or behind the cursor renumbers the playing track's own queue
   // position out from under both lists; the server refuses it too.
   if (index <= (station?.index ?? 0)) {
-    return { ok: false, message: "That track is already playing" };
+    return { ok: false, message: "Esa pista ya se está reproduciendo" };
   }
   return { ok: true, index, id: track.id };
 }

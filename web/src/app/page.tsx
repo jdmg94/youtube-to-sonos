@@ -10,7 +10,7 @@ import { PlayerBar } from "@/components/player-bar";
 import { PlayerSheet } from "@/components/player-sheet";
 import { QueuePanel } from "@/components/queue-panel";
 import { SpeakerDialog } from "@/components/speaker-dialog";
-import { StreamController } from "@/components/stream-controller";
+import { SearchPanel } from "@/components/search-panel";
 import { TabBar } from "@/components/tab-bar";
 import { VolumePanel } from "@/components/volume-panel";
 import { useEvents } from "@/lib/hooks/use-events";
@@ -43,8 +43,8 @@ const TAB_KEY = "yts.tab";
  * whichever tab is showing. The phone layout is not a second tree — the column
  * wrappers collapse to `display: contents` and the panels for the other tab
  * are hidden — because a second tree would mean two `useEvents` subscriptions
- * polling the same speaker on their own offsets, and a URL half-typed into
- * whichever `StreamController` was not mounted.
+ * polling the same speaker on their own offsets, and search results half-loaded
+ * into whichever `SearchPanel` was not mounted.
  */
 export default function Home() {
   const { devices, loading, error, refresh, selected, select } = useSpeaker();
@@ -163,7 +163,7 @@ export default function Home() {
               selected={selected}
               onSelect={(device) => {
                 select(device);
-                toast.success(`Selected speaker: ${device.name}`);
+                toast.success(`Altavoz seleccionado: ${device.name}`);
               }}
             />
           </Section>
@@ -181,8 +181,11 @@ export default function Home() {
         </Column>
 
         <Column>
-          <Section panel="stream" tab={tab} className="p-5 min-[601px]:p-8">
-            <StreamController device={selected} />
+          <Section panel="search" tab={tab} className="p-5 min-[601px]:p-8">
+            <SearchPanel
+              device={selected}
+              onNavigateToQueue={() => setTab("queue")}
+            />
           </Section>
 
           {/*
@@ -240,10 +243,9 @@ function Column({ children }: { children: React.ReactNode }) {
 /**
  * A glass panel that knows which phone tab it belongs to.
  *
- * Hidden with CSS rather than unmounted: the Stream controller holds a typed-in
- * URL and the analysis it produced, and unmounting on a tab switch would throw
- * both away — which is exactly what someone does when they paste a link and tap
- * Queue to watch it land.
+ * Hidden with CSS rather than unmounted: the Search panel holds search results
+ * and unmounting on a tab switch would throw them away — which is exactly what
+ * someone does when they search for a song and tap Queue to watch it land.
  */
 function Section({
   panel,

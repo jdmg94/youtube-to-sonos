@@ -121,8 +121,8 @@ describe("describeBridge", () => {
     // mDNS found nothing and the cloud vouched for the address. That is exactly
     // the row whose pairing fails with a network error, and saying so turns an
     // inexplicable failure into an obvious one.
-    assert.match(describeBridge(bridge({ source: "mdns" })).detail, /this network/);
-    assert.match(describeBridge(bridge({ source: "cloud" })).detail, /directory/);
+    assert.match(describeBridge(bridge({ source: "mdns" })).detail, /esta red/);
+    assert.match(describeBridge(bridge({ source: "cloud" })).detail, /directorio/);
   });
 
   it("always shows the address, which is the part that identifies it", () => {
@@ -168,10 +168,10 @@ describe("describeHue", () => {
   });
 
   it("counts the lights it is driving, in the right number", () => {
-    assert.equal(describeHue(health({ streaming: true, channels: [0] }), false).detail, "1 light");
+    assert.equal(describeHue(health({ streaming: true, channels: [0] }), false).detail, "1 luz");
     assert.equal(
       describeHue(health({ streaming: true, channels: [0, 1, 2] }), false).detail,
-      "3 lights",
+      "3 luces",
     );
   });
 
@@ -218,7 +218,7 @@ describe("describeArea", () => {
       health({ streaming: true, area: "area-1" }),
     );
     assert.equal(view.ready, true);
-    assert.equal(view.detail, "3 lights");
+    assert.equal(view.detail, "3 luces");
   });
 
   it("does not credit us with a stream running against a different area", () => {
@@ -235,7 +235,7 @@ describe("describeArea", () => {
   });
 
   it("counts lights in the right number", () => {
-    assert.equal(describeArea(area({ channels: [0] }), health()).detail, "1 light");
+    assert.equal(describeArea(area({ channels: [0] }), health()).detail, "1 luz");
   });
 
   it("names an area the bridge left unnamed", () => {

@@ -1,6 +1,6 @@
 "use client";
 
-import { ListMusic, SlidersHorizontal } from "lucide-react";
+import { ListMusic, Search, SlidersHorizontal } from "lucide-react";
 
 import { TABS, TAB_LABEL, type AppTab } from "@/lib/shell";
 import { cn } from "@/lib/utils";
@@ -25,6 +25,7 @@ import { cn } from "@/lib/utils";
  */
 const TAB_ICON: Record<AppTab, typeof ListMusic> = {
   queue: ListMusic,
+  search: Search,
   settings: SlidersHorizontal,
 };
 

@@ -7,7 +7,7 @@
  * and the player is a sheet that slides over whichever one is showing. That
  * split is expressed here as data — a panel-to-tab map — rather than as a
  * second component tree, because two trees would mean two `NowPlayingCard`s
- * subscribing to the same speaker and two `StreamController`s holding two
+ * subscribing to the same speaker and two `SearchPanel`s holding two
  * half-typed URLs.
  *
  * A `.ts` file, like the other view models, so Node can test it without a JSX
@@ -29,14 +29,15 @@ import { describeNowPlaying, trackArtwork } from "@/lib/now-playing";
  * two things you configure once and then forget live — which speaker, which
  * lamps — and it is the reason there is no `lights` tab either.
  */
-export type AppTab = "queue" | "settings";
+export type AppTab = "queue" | "search" | "settings";
 
 /** Source order for the tab bar. Queue first: it is what the app is for. */
-export const TABS: readonly AppTab[] = ["queue", "settings"];
+export const TABS: readonly AppTab[] = ["queue", "search", "settings"];
 
 export const TAB_LABEL: Record<AppTab, string> = {
-  queue: "Queue",
-  settings: "Settings",
+  queue: "Cola",
+  search: "Buscar",
+  settings: "Configuración",
 };
 
 export const DEFAULT_TAB: AppTab = "queue";
@@ -89,15 +90,15 @@ export function readTab(stored: unknown): AppTab {
  * absent. It is one panel on the desktop sidebar and a sheet over everything on
  * a phone, so it belongs to no tab and is never hidden by one.
  */
-export type Panel = "speaker" | "lights" | "stream" | "queue";
+export type Panel = "speaker" | "lights" | "search" | "queue";
 
 /**
  * Which tab each panel belongs to on a phone.
  *
  * This *is* the information architecture, and it is why it is a constant rather
  * than a chain of conditions in JSX. Two entries are not their own name, and
- * both are the pairings that needed deciding: `stream` — the paste-a-URL form —
- * is under **Queue**, because pasting a URL and then looking at what it queued
+ * both are the pairings that needed deciding: `search` — the YouTube search panel —
+ * is under **Search**, because searching for and then playing what you found
  * are one task; and `speaker` — the picker — is under **Settings** beside the
  * lights, because which box the sound comes out of is chosen about as often as
  * which lamps follow it.
@@ -110,7 +111,7 @@ export type Panel = "speaker" | "lights" | "stream" | "queue";
 export const PANEL_TAB: Record<Panel, AppTab> = {
   speaker: "settings",
   lights: "settings",
-  stream: "queue",
+  search: "search",
   queue: "queue",
 };
 
@@ -125,10 +126,10 @@ export function panelVisible(panel: Panel, tab: AppTab): boolean {
 }
 
 /** The bar's title when a speaker is chosen but silent. */
-export const NOTHING_PLAYING = "Nothing playing";
+export const NOTHING_PLAYING = "Nada reproduciendo";
 
 /** The bar's title before there is a speaker to play on at all. */
-export const NO_SPEAKER = "No speaker selected";
+export const NO_SPEAKER = "Ningún altavoz seleccionado";
 
 /**
  * The second line under `NO_SPEAKER`.
@@ -142,7 +143,7 @@ export const NO_SPEAKER = "No speaker selected";
  * that renaming the tab breaks a test instead of silently rewriting this
  * sentence into one nobody reviewed.
  */
-export const PICK_SPEAKER = "Choose one in Settings";
+export const PICK_SPEAKER = "Elige uno en Configuración";
 
 export interface PlayerBarView {
   title: string;

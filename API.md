@@ -119,6 +119,41 @@ Metadata only. Resolves through yt-dlp without downloading.
 
 ---
 
+## `GET /api/search`
+
+YouTube search. Returns video results for a query without downloading.
+
+**Query parameters:**
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `q` | required | Search query string |
+| `limit` | 10 | Number of results (1-20, clamped) |
+
+**200**
+
+```json
+{
+  "query": "string",
+  "results": [
+    {
+      "id": "string",
+      "title": "string | null",
+      "uploader": "string | null",
+      "thumbnail": "string | null",
+      "duration": "number | null"
+    }
+  ]
+}
+```
+
+`results` is an empty array when the search finds nothing (not a 404).
+
+**400** missing `q` parameter.
+**429/502/500** per the yt-dlp error classes (see top of document).
+
+---
+
 ## `POST /api/play`
 
 Request:

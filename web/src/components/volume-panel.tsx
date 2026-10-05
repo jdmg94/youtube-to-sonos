@@ -41,7 +41,7 @@ export function VolumePanel({ device }: VolumePanelProps) {
       <div className="flex items-center justify-between">
         <span className="flex items-center gap-2 text-[0.95rem] font-semibold">
           <Sliders aria-hidden className="size-4 text-gold" />
-          Volume
+          Volumen
         </span>
         {/*
          * The number is not `aria-live`. The slider's own `aria-valuenow`
@@ -61,7 +61,7 @@ export function VolumePanel({ device }: VolumePanelProps) {
         <button
           type="button"
           onClick={toggleMute}
-          aria-label={muted ? "Unmute speaker" : "Mute speaker"}
+          aria-label={muted ? "Activar sonido del altavoz" : "Silenciar altavoz"}
           /*
            * `aria-pressed` and not a checkbox: this is a toggle button whose
            * label changes with its state, and the pressed state is the only
@@ -69,7 +69,7 @@ export function VolumePanel({ device }: VolumePanelProps) {
            * — the icon that carries it visually is `aria-hidden`.
            */
           aria-pressed={muted}
-          title={muted ? "Unmute" : "Mute"}
+          title={muted ? "Activar sonido" : "Silenciar"}
           className={cn(
             "flex size-10 shrink-0 cursor-pointer items-center justify-center rounded-[10px] border transition-all duration-200",
             muted
@@ -88,7 +88,7 @@ export function VolumePanel({ device }: VolumePanelProps) {
          */}
         <div className="flex h-10 grow items-center">
           <Slider
-            aria-label="Volume"
+            aria-label="Volumen"
             value={[volume]}
             min={0}
             max={100}
@@ -113,7 +113,7 @@ export function VolumePanel({ device }: VolumePanelProps) {
             key={preset}
             type="button"
             onClick={() => setVolume(preset)}
-            aria-label={`Set volume to ${preset}`}
+            aria-label={`Ajustar volumen a ${preset}`}
             className="flex-1 cursor-pointer rounded-lg border border-border bg-white/[0.05] py-[0.35rem] text-center text-[0.72rem] font-medium text-muted-foreground transition-all duration-200 hover:border-gold/30 hover:bg-gold/[0.12] hover:text-gold"
           >
             {preset}

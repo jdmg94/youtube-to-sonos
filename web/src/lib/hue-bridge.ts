@@ -61,14 +61,14 @@ export function pairingStep(status: number, elapsedMs: number): PairStep {
 
 /** Shown when the window runs out. Not an API message — the API never failed. */
 export const PAIR_TIMEOUT_MESSAGE =
-  "The link button was not pressed in time. Press it on the bridge, then try again.";
+  "El botón de enlace no se presionó a tiempo. Presiónalo en el puente y luego intenta de nuevo.";
 
 // ---------------------------------------------------------------------------
 // Bridges
 // ---------------------------------------------------------------------------
 
 /** A bridge that told us nothing but its address. */
-export const UNNAMED_BRIDGE = "Hue Bridge";
+export const UNNAMED_BRIDGE = "Puente Hue";
 
 export interface BridgeView {
   label: string;
@@ -90,8 +90,8 @@ export function describeBridge(bridge: HueBridge): BridgeView {
     label: present(bridge.name) ? bridge.name : UNNAMED_BRIDGE,
     detail:
       bridge.source === "mdns"
-        ? `${bridge.ip} · found on this network`
-        : `${bridge.ip} · from Philips' directory`,
+        ? `${bridge.ip} · encontrado en esta red`
+        : `${bridge.ip} · del directorio de Philips`,
   };
 }
 
@@ -114,7 +114,7 @@ export interface HueStatusView {
 }
 
 /** Shown before the first `/api/hue/health` answers. */
-export const HUE_UNKNOWN = "Checking for a Hue bridge…";
+export const HUE_UNKNOWN = "Verificando un puente Hue…";
 
 /**
  * The banner on the dialog trigger.
@@ -133,27 +133,27 @@ export function describeHue(
   if (!health) {
     return loading
       ? { tone: "loading", label: HUE_UNKNOWN, detail: null }
-      : { tone: "error", label: "Hue unavailable", detail: null };
+      : { tone: "error", label: "Hue no disponible", detail: null };
   }
 
   if (!health.paired) {
-    return { tone: "setup", label: "Connect Hue lights", detail: null };
+    return { tone: "setup", label: "Conectar luces Hue", detail: null };
   }
 
   if (health.streaming) {
-    const lights = `${health.channels.length} ${health.channels.length === 1 ? "light" : "lights"}`;
+    const lights = `${health.channels.length} ${health.channels.length === 1 ? "luz" : "luces"}`;
     return {
       tone: "live",
-      label: present(areaName) ? areaName : "Lights following",
+      label: present(areaName) ? areaName : "Luces siguiendo",
       detail: lights,
     };
   }
 
   if (present(health.error)) {
-    return { tone: "error", label: "Lights stopped", detail: health.error };
+    return { tone: "error", label: "Luces detenidas", detail: health.error };
   }
 
-  return { tone: "ready", label: "Hue ready", detail: health.bridge_ip };
+  return { tone: "ready", label: "Hue listo", detail: health.bridge_ip };
 }
 
 // ---------------------------------------------------------------------------
@@ -164,12 +164,12 @@ export function describeHue(
 const AREA_ACTIVE = "active";
 
 /** An area the bridge exposes but no lights have been assigned to. */
-export const AREA_EMPTY_NOTE = "No lights assigned";
+export const AREA_EMPTY_NOTE = "Sin luces asignadas";
 
 /** An area some other app is already streaming to. */
-export const AREA_BUSY_NOTE = "In use by another app";
+export const AREA_BUSY_NOTE = "En uso por otra aplicación";
 
-export const UNNAMED_AREA = "Entertainment area";
+export const UNNAMED_AREA = "Área de entretenimiento";
 
 export interface AreaView {
   label: string;
@@ -202,7 +202,7 @@ export function describeArea(area: HueArea, health: HueHealth | null): AreaView 
     return { label, detail: AREA_EMPTY_NOTE, ready: false };
   }
 
-  const lights = `${count} ${count === 1 ? "light" : "lights"}`;
+  const lights = `${count} ${count === 1 ? "luz" : "luces"}`;
   const ours = Boolean(health?.streaming) && health?.area === area.id;
   if (area.status === AREA_ACTIVE && !ours) {
     return { label, detail: `${lights} · ${AREA_BUSY_NOTE}`, ready: false };

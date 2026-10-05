@@ -2508,6 +2508,41 @@ def get_info():
     except Exception as e:
         return _yt_error_response(e, "metadata fetch")
 
+@app.route('/api/search', methods=['GET'])
+def search():
+    query = request.args.get('q', '').strip()
+    if not query:
+        return jsonify({'error': 'Missing query parameter'}), 400
+
+    limit = request.args.get('limit', '10')
+    try:
+        limit = max(1, min(20, int(limit)))
+    except ValueError:
+        limit = 10
+
+    search_url = f"ytsearch{limit}:{query}"
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts(extract_flat=True)) as ydl:
+            info = ydl.extract_info(search_url, download=False)
+
+        results = []
+        for entry in (info.get('entries') or []):
+            if not entry:
+                continue
+            results.append({
+                'id': entry.get('id'),
+                'title': entry.get('title'),
+                'uploader': entry.get('uploader') or entry.get('channel'),
+                'thumbnail': entry.get('thumbnail'),
+                'duration': entry.get('duration'),
+            })
+
+        return jsonify({'query': query, 'results': results})
+
+    except Exception as e:
+        return _yt_error_response(e, "search")
+
 def _video_id_from_url(url):
     """Video id from any YouTube URL form, without calling YouTube."""
     m = re.search(r'(?:v=|youtu\.be/|/shorts/|/embed/)([A-Za-z0-9_-]{11})', url)

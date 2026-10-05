@@ -60,7 +60,7 @@ function station(overrides: Partial<StationBody> = {}): StationBody {
   return { index: 0, exhausted: false, tracks: [track()], ...overrides };
 }
 
-const ALL_PANELS: readonly Panel[] = ["speaker", "lights", "stream", "queue"];
+const ALL_PANELS: readonly Panel[] = ["speaker", "lights", "search", "queue"];
 
 // ---------------------------------------------------------------------------
 
@@ -144,10 +144,10 @@ describe("PANEL_TAB", () => {
     }
   });
 
-  it("keeps the URL box with the queue it fills", () => {
-    // Deliberate, and the one assignment a reader is likely to think is a typo:
-    // pasting a link and seeing what it queued are one task.
-    assert.equal(PANEL_TAB.stream, PANEL_TAB.queue);
+  it("keeps the search panel with its own tab", () => {
+    // The search panel belongs to the search tab, where a user can find and play
+    // songs from YouTube.
+    assert.equal(PANEL_TAB.search, "search");
   });
 
   it("keeps the speaker picker with the lights", () => {
@@ -161,7 +161,7 @@ describe("PANEL_TAB", () => {
     // `display: contents`, so key order here is the stacking order there. A
     // reordering that put Lights between the two Queue panels would interleave
     // two tabs' worth of markup and could not be expressed by hiding panels.
-    assert.deepEqual(Object.keys(PANEL_TAB), ["speaker", "lights", "stream", "queue"]);
+    assert.deepEqual(Object.keys(PANEL_TAB), ["speaker", "lights", "search", "queue"]);
   });
 
   it("groups each tab's panels contiguously", () => {
@@ -209,7 +209,7 @@ describe("describePlayerBar", () => {
   it("describes a playing track", () => {
     const bar = describePlayerBar(frame(), station(), "Kitchen");
     assert.equal(bar.title, "Rocket Man");
-    assert.equal(bar.subtitle, "Now playing · Kitchen");
+    assert.equal(bar.subtitle, "Reproduciendo · Kitchen");
     assert.equal(bar.live, true);
     assert.equal(bar.idle, false);
   });
@@ -217,7 +217,7 @@ describe("describePlayerBar", () => {
   it("shows a paused track without the equalizer running", () => {
     const bar = describePlayerBar(frame({ state: "PAUSED_PLAYBACK" }), station(), "Kitchen");
     assert.equal(bar.title, "Rocket Man");
-    assert.match(bar.subtitle, /^Paused/);
+    assert.match(bar.subtitle, /^Pausado/);
     assert.equal(bar.live, false);
     assert.equal(bar.idle, false);
   });
@@ -274,7 +274,7 @@ describe("describePlayerBar", () => {
     // The two disagree for one stream teardown after the user switches rooms,
     // and the frame is the one describing audible sound.
     const bar = describePlayerBar(frame({ device: "Office" }), station(), "Kitchen");
-    assert.equal(bar.subtitle, "Now playing · Office");
+    assert.equal(bar.subtitle, "Reproduciendo · Office");
     const idle = describePlayerBar(frame({ state: "STOPPED", device: "Office" }), null, "Kitchen");
     assert.equal(idle.subtitle, "Office");
   });
