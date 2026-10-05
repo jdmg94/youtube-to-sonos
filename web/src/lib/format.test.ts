@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { NO_DURATION, formatDuration } from "@/lib/format";
+import { NO_DURATION, formatDuration, parseSonosTime } from "@/lib/format";
 
 describe("formatDuration", () => {
   it("formats a song as m:ss", () => {
@@ -65,5 +65,44 @@ describe("formatDuration", () => {
     assert.equal(formatDuration(-5), NO_DURATION);
     assert.equal(formatDuration(Number.NaN), NO_DURATION);
     assert.equal(formatDuration(Number.POSITIVE_INFINITY), NO_DURATION);
+  });
+});
+
+describe("parseSonosTime", () => {
+  it("parses a typical track position as seconds", () => {
+    assert.equal(parseSonosTime("0:04:41"), 281);
+  });
+
+  it("parses hour-length tracks", () => {
+    assert.equal(parseSonosTime("2:15:30"), 8130);
+  });
+
+  it("treats 0:00:00 as null (idle speaker)", () => {
+    assert.equal(parseSonosTime("0:00:00"), null);
+  });
+
+  it("handles null and undefined", () => {
+    assert.equal(parseSonosTime(null), null);
+    assert.equal(parseSonosTime(undefined), null);
+  });
+
+  it("floors fractional seconds if present", () => {
+    assert.equal(parseSonosTime("0:04:41.5"), 281);
+  });
+
+  it("rejects malformed strings", () => {
+    assert.equal(parseSonosTime("invalid"), null);
+    assert.equal(parseSonosTime("4:41"), null); // missing hours field
+    assert.equal(parseSonosTime(""), null);
+  });
+
+  it("parses zero hours", () => {
+    assert.equal(parseSonosTime("0:00:01"), 1);
+    assert.equal(parseSonosTime("0:01:00"), 60);
+  });
+
+  it("handles multi-digit hours", () => {
+    assert.equal(parseSonosTime("10:00:00"), 36000);
+    assert.equal(parseSonosTime("100:30:45"), 361845);
   });
 });
