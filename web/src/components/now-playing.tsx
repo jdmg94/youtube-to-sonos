@@ -56,7 +56,7 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
   );
   const stop = useAction(async () => {
     const result = await api.stop(deviceIp);
-    toast.success(`Playback stopped on ${result.device}`);
+    toast.success(`Reproducción detenida en ${result.device}`);
     return result;
   });
 
@@ -64,7 +64,7 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
   useErrorToast(stop.error);
 
   const view = describeNowPlaying(nowPlaying, device?.name ?? null);
-  useTrackChange(view.mode, view.title, (title) => toast(`Now playing: ${title}`));
+  useTrackChange(view.mode, view.title, (title) => toast(`Reproduciendo: ${title}`));
 
   /*
    * Keyed on the title, because that is the only thing that changes the answer:
@@ -133,7 +133,7 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
 
       <div className="flex items-center gap-[0.6rem]">
         <NavButton
-          label="Previous track"
+          label="Pista anterior"
           icon={SkipBack}
           live={live}
           disabled={!canGoPrevious(station) || transport.pending}
@@ -143,7 +143,7 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
         <PlayPause device={device} state={nowPlaying?.state} variant="wide" live={live} />
 
         <NavButton
-          label="Next track"
+          label="Siguiente pista"
           icon={SkipForward}
           live={live}
           disabled={!canGoNext(station) || transport.pending}
@@ -157,8 +157,8 @@ export function NowPlayingCard({ device, nowPlaying, station }: NowPlayingCardPr
          */}
         <button
           type="button"
-          aria-label="Stop playback"
-          title="Stop playback"
+          aria-label="Detener reproducción"
+          title="Detener reproducción"
           onClick={() => stop.run()}
           disabled={stop.pending}
           className={cn(

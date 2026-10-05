@@ -39,7 +39,7 @@ const ENGAGED_STATES: readonly PlaybackState[] = [
  * speaker *is* playing, and a blank line where the title goes reads as a broken
  * card rather than as a nameless track.
  */
-export const UNTITLED_TRACK = "Streaming audio";
+export const UNTITLED_TRACK = "Audio en transmisión";
 
 /** The idle title. An em dash, because an empty string collapses the row. */
 export const NO_TRACK = "—";
@@ -105,12 +105,12 @@ export function describeNowPlaying(
   // `playbackMode` already answers "idle" for a missing frame; the second half
   // of this test is what tells the compiler so.
   if (mode === "idle" || !nowPlaying) {
-    return { mode: "idle", label: `Idle${suffix}`, title: NO_TRACK, device };
+    return { mode: "idle", label: `Inactivo${suffix}`, title: NO_TRACK, device };
   }
 
   return {
     mode,
-    label: `${mode === "paused" ? "Paused" : "Now playing"}${suffix}`,
+    label: `${mode === "paused" ? "Pausado" : "Reproduciendo"}${suffix}`,
     title: trackTitle(nowPlaying.title),
     device,
   };
@@ -155,8 +155,8 @@ export interface ToggleView {
 export function describeToggle(mode: NowPlayingMode): ToggleView | null {
   if (mode === "idle") return null;
   return mode === "paused"
-    ? { action: "play", label: "Play" }
-    : { action: "pause", label: "Pause" };
+    ? { action: "play", label: "Reproducir" }
+    : { action: "pause", label: "Pausar" };
 }
 
 /**

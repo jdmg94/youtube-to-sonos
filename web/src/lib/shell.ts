@@ -35,9 +35,9 @@ export type AppTab = "queue" | "search" | "settings";
 export const TABS: readonly AppTab[] = ["queue", "search", "settings"];
 
 export const TAB_LABEL: Record<AppTab, string> = {
-  queue: "Queue",
-  search: "Search",
-  settings: "Settings",
+  queue: "Cola",
+  search: "Buscar",
+  settings: "Configuración",
 };
 
 export const DEFAULT_TAB: AppTab = "queue";
@@ -126,10 +126,10 @@ export function panelVisible(panel: Panel, tab: AppTab): boolean {
 }
 
 /** The bar's title when a speaker is chosen but silent. */
-export const NOTHING_PLAYING = "Nothing playing";
+export const NOTHING_PLAYING = "Nada reproduciendo";
 
 /** The bar's title before there is a speaker to play on at all. */
-export const NO_SPEAKER = "No speaker selected";
+export const NO_SPEAKER = "Ningún altavoz seleccionado";
 
 /**
  * The second line under `NO_SPEAKER`.
@@ -143,7 +143,7 @@ export const NO_SPEAKER = "No speaker selected";
  * that renaming the tab breaks a test instead of silently rewriting this
  * sentence into one nobody reviewed.
  */
-export const PICK_SPEAKER = "Choose one in Settings";
+export const PICK_SPEAKER = "Elige uno en Configuración";
 
 export interface PlayerBarView {
   title: string;

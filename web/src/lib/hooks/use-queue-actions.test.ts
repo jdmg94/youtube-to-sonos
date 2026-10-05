@@ -269,7 +269,7 @@ describe("useQueueActions", () => {
     await settle();
     assert.deepEqual(removals, [], "never sent — the server would refuse it too");
     assert.deepEqual(visible(), ["a", "b", "c"]);
-    assert.equal(actions.error?.message, "That track is already playing");
+    assert.equal(actions.error?.message, "Esa pista ya se está reproduciendo");
   });
 
   it("forgets everything when the speaker changes", async () => {
@@ -309,7 +309,7 @@ describe("useQueueActions", () => {
     act(() => actions.jump("b"));
     await settle();
     assert.deepEqual(jumps, []);
-    assert.equal(actions.error?.message, "That track is still downloading");
+    assert.equal(actions.error?.message, "Esa pista aún se está descargando");
   });
 
   it("reports a jump as pending until it settles", async () => {

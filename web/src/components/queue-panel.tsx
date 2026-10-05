@@ -68,14 +68,14 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
       <div className="mb-4 flex shrink-0 items-center justify-between">
         <span className="flex items-center gap-2 text-[0.95rem] font-semibold">
           <ListMusic aria-hidden className="size-4 text-gold" />
-          Queue
+          Cola
         </span>
 
         <button
           type="button"
           onClick={() => refresh.run()}
           disabled={!canRefresh(queue.station, !!device, refresh.pending)}
-          title="Discard what's queued ahead and fetch a fresh set of songs"
+          title="Descartar lo que está en cola y obtener un nuevo conjunto de canciones"
           className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-border bg-white/[0.05] px-[0.7rem] py-[0.3rem] text-[0.75rem] font-medium text-muted-foreground transition-all duration-200 hover:border-gold/35 hover:bg-gold/[0.12] hover:text-gold disabled:pointer-events-none disabled:opacity-45"
         >
           {refresh.pending ? (
@@ -83,7 +83,7 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
           ) : (
             <RefreshCw aria-hidden className="size-3.5" />
           )}
-          Refresh
+          Actualizar
         </button>
       </div>
 
@@ -118,7 +118,7 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
           {upcoming.length > 0 && (
             <QueueList
               rows={upcoming}
-              label="Playing and upcoming"
+              label="Reproduciendo y próximas"
               device={device}
               queue={queue}
             />
@@ -134,10 +134,10 @@ export function QueuePanel({ device, station }: QueuePanelProps) {
                * into the history.
                */}
               <p className="mt-1 flex shrink-0 items-center gap-2 text-[0.7rem] font-medium tracking-wide text-muted-foreground uppercase">
-                Played
+                Reproducidas
                 <span aria-hidden className="h-px grow bg-border" />
               </p>
-              <QueueList rows={played} label="Already played" device={device} queue={queue} />
+              <QueueList rows={played} label="Ya reproducidas" device={device} queue={queue} />
             </>
           )}
         </div>
@@ -312,8 +312,8 @@ function QueueItem({
           type="button"
           onClick={onRemove}
           disabled={disabled}
-          aria-label={`Remove ${row.title} from the queue`}
-          title="Remove from the queue"
+          aria-label={`Quitar ${row.title} de la cola`}
+          title="Quitar de la cola"
           className="mr-2 flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-lg text-muted-foreground transition-colors duration-200 hover:bg-destructive/15 hover:text-destructive disabled:pointer-events-none disabled:opacity-40"
         >
           <X aria-hidden className="size-3.5" />

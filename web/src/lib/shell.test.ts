@@ -209,7 +209,7 @@ describe("describePlayerBar", () => {
   it("describes a playing track", () => {
     const bar = describePlayerBar(frame(), station(), "Kitchen");
     assert.equal(bar.title, "Rocket Man");
-    assert.equal(bar.subtitle, "Now playing · Kitchen");
+    assert.equal(bar.subtitle, "Reproduciendo · Kitchen");
     assert.equal(bar.live, true);
     assert.equal(bar.idle, false);
   });
@@ -217,7 +217,7 @@ describe("describePlayerBar", () => {
   it("shows a paused track without the equalizer running", () => {
     const bar = describePlayerBar(frame({ state: "PAUSED_PLAYBACK" }), station(), "Kitchen");
     assert.equal(bar.title, "Rocket Man");
-    assert.match(bar.subtitle, /^Paused/);
+    assert.match(bar.subtitle, /^Pausado/);
     assert.equal(bar.live, false);
     assert.equal(bar.idle, false);
   });
@@ -274,7 +274,7 @@ describe("describePlayerBar", () => {
     // The two disagree for one stream teardown after the user switches rooms,
     // and the frame is the one describing audible sound.
     const bar = describePlayerBar(frame({ device: "Office" }), station(), "Kitchen");
-    assert.equal(bar.subtitle, "Now playing · Office");
+    assert.equal(bar.subtitle, "Reproduciendo · Office");
     const idle = describePlayerBar(frame({ state: "STOPPED", device: "Office" }), null, "Kitchen");
     assert.equal(idle.subtitle, "Office");
   });
