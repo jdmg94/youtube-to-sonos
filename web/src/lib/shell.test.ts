@@ -60,7 +60,7 @@ function station(overrides: Partial<StationBody> = {}): StationBody {
   return { index: 0, exhausted: false, tracks: [track()], ...overrides };
 }
 
-const ALL_PANELS: readonly Panel[] = ["speaker", "lights", "search", "stream", "queue"];
+const ALL_PANELS: readonly Panel[] = ["speaker", "lights", "search", "queue"];
 
 // ---------------------------------------------------------------------------
 
@@ -144,10 +144,10 @@ describe("PANEL_TAB", () => {
     }
   });
 
-  it("keeps the URL box with the queue it fills", () => {
-    // Deliberate, and the one assignment a reader is likely to think is a typo:
-    // pasting a link and seeing what it queued are one task.
-    assert.equal(PANEL_TAB.stream, PANEL_TAB.queue);
+  it("keeps the search panel with its own tab", () => {
+    // The search panel belongs to the search tab, where a user can find and play
+    // songs from YouTube.
+    assert.equal(PANEL_TAB.search, "search");
   });
 
   it("keeps the speaker picker with the lights", () => {
@@ -161,7 +161,7 @@ describe("PANEL_TAB", () => {
     // `display: contents`, so key order here is the stacking order there. A
     // reordering that put Lights between the two Queue panels would interleave
     // two tabs' worth of markup and could not be expressed by hiding panels.
-    assert.deepEqual(Object.keys(PANEL_TAB), ["speaker", "lights", "search", "stream", "queue"]);
+    assert.deepEqual(Object.keys(PANEL_TAB), ["speaker", "lights", "search", "queue"]);
   });
 
   it("groups each tab's panels contiguously", () => {

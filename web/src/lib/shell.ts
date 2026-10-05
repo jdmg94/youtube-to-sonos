@@ -7,7 +7,7 @@
  * and the player is a sheet that slides over whichever one is showing. That
  * split is expressed here as data — a panel-to-tab map — rather than as a
  * second component tree, because two trees would mean two `NowPlayingCard`s
- * subscribing to the same speaker and two `StreamController`s holding two
+ * subscribing to the same speaker and two `SearchPanel`s holding two
  * half-typed URLs.
  *
  * A `.ts` file, like the other view models, so Node can test it without a JSX
@@ -90,15 +90,15 @@ export function readTab(stored: unknown): AppTab {
  * absent. It is one panel on the desktop sidebar and a sheet over everything on
  * a phone, so it belongs to no tab and is never hidden by one.
  */
-export type Panel = "speaker" | "lights" | "search" | "stream" | "queue";
+export type Panel = "speaker" | "lights" | "search" | "queue";
 
 /**
  * Which tab each panel belongs to on a phone.
  *
  * This *is* the information architecture, and it is why it is a constant rather
  * than a chain of conditions in JSX. Two entries are not their own name, and
- * both are the pairings that needed deciding: `stream` — the paste-a-URL form —
- * is under **Queue**, because pasting a URL and then looking at what it queued
+ * both are the pairings that needed deciding: `search` — the YouTube search panel —
+ * is under **Search**, because searching for and then playing what you found
  * are one task; and `speaker` — the picker — is under **Settings** beside the
  * lights, because which box the sound comes out of is chosen about as often as
  * which lamps follow it.
@@ -112,7 +112,6 @@ export const PANEL_TAB: Record<Panel, AppTab> = {
   speaker: "settings",
   lights: "settings",
   search: "search",
-  stream: "queue",
   queue: "queue",
 };
 
