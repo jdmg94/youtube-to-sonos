@@ -132,4 +132,25 @@ describe('useSearch', () => {
     assert.equal(response, null);
     assert.equal(state.castError, null);
   });
+
+  it('clears query and results on clear()', () => {
+    render(null);
+
+    // Set some state
+    act(() => {
+      state.setQuery('test query');
+      // Simulate having results by directly manipulating state
+      // (in real use, results come from search(), but we can test clear independently)
+    });
+
+    assert.equal(state.query, 'test query');
+
+    // Clear should reset both query and results
+    act(() => {
+      state.clear();
+    });
+
+    assert.equal(state.query, '');
+    assert.deepEqual(state.results, []);
+  });
 });

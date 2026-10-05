@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from 'react';
-import { Clock, Infinity as InfinityIcon, Loader2, Play, Plus, Search } from "lucide-react";
+import { Clock, Infinity as InfinityIcon, Loader2, Play, Plus, Search, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Input } from "@/components/ui/input";
@@ -50,7 +50,7 @@ export function SearchPanel({ device, onNavigateToQueue }: SearchPanelProps) {
       </h2>
 
       <form
-        className="mb-6 flex gap-3"
+        className="mb-6 flex flex-col gap-3 md:flex-row"
         onSubmit={(event) => {
           event.preventDefault();
           search.search();
@@ -59,22 +59,37 @@ export function SearchPanel({ device, onNavigateToQueue }: SearchPanelProps) {
         <label className="sr-only" htmlFor="search-query">
           Search YouTube
         </label>
-        <Input
-          ref={inputRef}
-          id="search-query"
-          type="text"
-          value={search.query}
-          onChange={(event) => search.setQuery(event.target.value)}
-          placeholder="Search YouTube (e.g. 'never gonna give you up')"
-          autoComplete="off"
-          spellCheck={false}
-          className="h-auto grow rounded-[14px] border-border bg-white/[0.05] px-5 py-4 text-base transition-all duration-300 focus-visible:border-brand focus-visible:bg-white/[0.08] focus-visible:shadow-[0_0_15px_rgba(255,0,85,0.15)] focus-visible:ring-0 md:text-base"
-        />
+        <div className="relative grow">
+          <Input
+            ref={inputRef}
+            id="search-query"
+            type="text"
+            value={search.query}
+            onChange={(event) => search.setQuery(event.target.value)}
+            placeholder="Search YouTube (e.g. 'never gonna give you up')"
+            autoComplete="off"
+            spellCheck={false}
+            className="h-auto w-full rounded-[14px] border-border bg-white/[0.05] px-5 py-4 pr-12 text-base transition-all duration-300 focus-visible:border-brand focus-visible:bg-white/[0.08] focus-visible:shadow-[0_0_15px_rgba(255,0,85,0.15)] focus-visible:ring-0 md:text-base"
+          />
+          {search.query && (
+            <button
+              type="button"
+              onClick={() => {
+                search.clear();
+                inputRef.current?.focus();
+              }}
+              className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-white/[0.1] hover:text-foreground"
+              aria-label="Clear search"
+            >
+              <X aria-hidden className="size-4" />
+            </button>
+          )}
+        </div>
         <button
           type="submit"
           disabled={!search.query.trim()}
           className={cn(
-            "flex shrink-0 cursor-pointer items-center gap-2 rounded-[14px] bg-gradient-to-br from-brand to-brand-strong px-7 py-4 font-semibold text-white",
+            "flex cursor-pointer items-center justify-center gap-2 rounded-[14px] bg-gradient-to-br from-brand to-brand-strong px-7 py-4 font-semibold text-white md:shrink-0",
             "transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)] hover:-translate-y-0.5 hover:shadow-[0_6px_20px_rgba(255,0,85,0.4)]",
             "disabled:pointer-events-none disabled:opacity-50",
           )}
