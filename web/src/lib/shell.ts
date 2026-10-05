@@ -29,13 +29,14 @@ import { describeNowPlaying, trackArtwork } from "@/lib/now-playing";
  * two things you configure once and then forget live — which speaker, which
  * lamps — and it is the reason there is no `lights` tab either.
  */
-export type AppTab = "queue" | "settings";
+export type AppTab = "queue" | "search" | "settings";
 
 /** Source order for the tab bar. Queue first: it is what the app is for. */
-export const TABS: readonly AppTab[] = ["queue", "settings"];
+export const TABS: readonly AppTab[] = ["queue", "search", "settings"];
 
 export const TAB_LABEL: Record<AppTab, string> = {
   queue: "Queue",
+  search: "Search",
   settings: "Settings",
 };
 
@@ -89,7 +90,7 @@ export function readTab(stored: unknown): AppTab {
  * absent. It is one panel on the desktop sidebar and a sheet over everything on
  * a phone, so it belongs to no tab and is never hidden by one.
  */
-export type Panel = "speaker" | "lights" | "stream" | "queue";
+export type Panel = "speaker" | "lights" | "search" | "stream" | "queue";
 
 /**
  * Which tab each panel belongs to on a phone.
@@ -110,6 +111,7 @@ export type Panel = "speaker" | "lights" | "stream" | "queue";
 export const PANEL_TAB: Record<Panel, AppTab> = {
   speaker: "settings",
   lights: "settings",
+  search: "search",
   stream: "queue",
   queue: "queue",
 };

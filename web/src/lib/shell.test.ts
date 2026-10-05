@@ -60,7 +60,7 @@ function station(overrides: Partial<StationBody> = {}): StationBody {
   return { index: 0, exhausted: false, tracks: [track()], ...overrides };
 }
 
-const ALL_PANELS: readonly Panel[] = ["speaker", "lights", "stream", "queue"];
+const ALL_PANELS: readonly Panel[] = ["speaker", "lights", "search", "stream", "queue"];
 
 // ---------------------------------------------------------------------------
 
@@ -161,7 +161,7 @@ describe("PANEL_TAB", () => {
     // `display: contents`, so key order here is the stacking order there. A
     // reordering that put Lights between the two Queue panels would interleave
     // two tabs' worth of markup and could not be expressed by hiding panels.
-    assert.deepEqual(Object.keys(PANEL_TAB), ["speaker", "lights", "stream", "queue"]);
+    assert.deepEqual(Object.keys(PANEL_TAB), ["speaker", "lights", "search", "stream", "queue"]);
   });
 
   it("groups each tab's panels contiguously", () => {
