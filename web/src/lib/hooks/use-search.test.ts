@@ -10,11 +10,6 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
 import { useSearch } from './use-search.ts';
-import { api } from '@/lib/api/client';
-import type { SearchResponse, PlayResponse } from '@/lib/api/types';
-
-/** Must match the key in the hook. */
-const AUTOPLAY_KEY = 'yts.autoplay';
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;

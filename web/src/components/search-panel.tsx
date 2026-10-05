@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { Clock, Infinity as InfinityIcon, Loader2, Play, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 
@@ -20,6 +20,10 @@ export interface SearchPanelProps {
 export function SearchPanel({ device, onNavigateToQueue }: SearchPanelProps) {
   const search = useSearch(device?.ip ?? null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Task 3's useSearch uses Error, not ApiError
   useErrorToast(search.searchError as any);
