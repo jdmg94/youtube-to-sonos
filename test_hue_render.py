@@ -1,5 +1,5 @@
 import unittest
-from hue_render import parse_sonos_time, Clock, position_at, sync_clock, hsv_to_rgb, sample, last_beat_index, create_renderer
+from hue_render import parse_sonos_time, Clock, position_at, sync_clock, hsv_to_rgb, sample, last_beat_index, create_renderer, order_channels, spread_across
 
 
 class ParseSonosTime(unittest.TestCase):
@@ -161,3 +161,64 @@ class FrameAt(unittest.TestCase):
         frame = renderer.frame_at(0.5)
         # MIN_VALUE = 0.15, so should be at least that
         self.assertGreaterEqual(frame['value'], 0.15)
+
+
+class OrderChannels(unittest.TestCase):
+    def test_orders_by_x_when_wider(self):
+        channels = [2, 0, 1]
+        positions = {
+            '0': {'x': 0.5, 'y': 0.0, 'z': 0.0},
+            '1': {'x': 0.0, 'y': 0.1, 'z': 0.0},
+            '2': {'x': 1.0, 'y': 0.2, 'z': 0.0},
+        }
+        self.assertEqual(order_channels(channels, positions), [1, 0, 2])
+
+    def test_orders_by_y_when_taller(self):
+        channels = [2, 0, 1]
+        positions = {
+            '0': {'x': 0.1, 'y': 0.5, 'z': 0.0},
+            '1': {'x': 0.0, 'y': 0.0, 'z': 0.0},
+            '2': {'x': 0.2, 'y': 1.0, 'z': 0.0},
+        }
+        self.assertEqual(order_channels(channels, positions), [1, 0, 2])
+
+    def test_falls_back_to_id_when_no_positions(self):
+        channels = [3, 1, 2]
+        positions = {}
+        self.assertEqual(order_channels(channels, positions), [1, 2, 3])
+
+    def test_falls_back_when_position_missing(self):
+        channels = [1, 2]
+        positions = {'1': {'x': 0.5, 'y': 0.0, 'z': 0.0}}  # 2 missing
+        self.assertEqual(order_channels(channels, positions), [1, 2])
+
+
+class SpreadAcross(unittest.TestCase):
+    def test_spreads_hue_across_channels(self):
+        frame = {'hue': 140, 'saturation': 0.9, 'value': 0.8}
+        ordered = [0, 1, 2]
+        spread_deg = 60
+        colors = spread_across(frame, ordered, spread_deg)
+
+        # Three channels: -30, 0, +30 from center hue
+        self.assertEqual(len(colors), 3)
+        # Keys are stringified channel ids
+        self.assertIn('0', colors)
+        self.assertIn('2', colors)
+        # First channel shifted left, last shifted right
+        # (exact RGB values depend on HSV conversion, just verify they differ)
+        self.assertNotEqual(colors['0'], colors['2'])
+
+    def test_single_channel_at_center(self):
+        frame = {'hue': 100, 'saturation': 0.9, 'value': 0.8}
+        colors = spread_across(frame, [5], 60)
+        # Rank = 0.5 (middle), shift = 0
+        self.assertEqual(colors['5'], hsv_to_rgb(100, 0.9, 0.8))
+
+    def test_returns_rgb_tuples(self):
+        frame = {'hue': 120, 'saturation': 1.0, 'value': 1.0}
+        colors = spread_across(frame, [0, 1], 30)
+        # Should be 8-bit RGB tuples
+        self.assertIsInstance(colors['0'], tuple)
+        self.assertEqual(len(colors['0']), 3)
+        self.assertTrue(all(0 <= c <= 255 for c in colors['0']))

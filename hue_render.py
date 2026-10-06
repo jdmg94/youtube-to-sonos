@@ -27,6 +27,7 @@ TAU_MIN_SECONDS = 0.05
 TAU_MAX_SECONDS = 2.0
 COLOR_EPSILON = 3
 IDLE_COLOR = (60, 45, 30)
+POSITION_EPSILON = 1e-6
 
 
 @dataclass
@@ -192,3 +193,41 @@ class Renderer:
 def create_renderer(analysis):
     """Build renderer from analysis sidecar."""
     return Renderer(analysis)
+
+
+def order_channels(channels, positions):
+    """Order channels by physical position (x or y, whichever spans more). Falls back to ID."""
+    by_id = sorted(channels)
+    if len(by_id) <= 1:
+        return by_id
+
+    # Check if all channels have positions
+    placed = [positions.get(str(ch)) for ch in by_id]
+    if any(p is None for p in placed):
+        return by_id
+
+    # Measure span on each axis
+    x_vals = [p['x'] for p in placed]
+    y_vals = [p['y'] for p in placed]
+    span_x = max(x_vals) - min(x_vals)
+    span_y = max(y_vals) - min(y_vals)
+
+    if max(span_x, span_y) <= POSITION_EPSILON:
+        return by_id
+
+    axis = 'x' if span_x >= span_y else 'y'
+    # Sort by axis, ties broken by existing order (stable)
+    indexed = [(ch, placed[i][axis]) for i, ch in enumerate(by_id)]
+    indexed.sort(key=lambda pair: pair[1])
+    return [ch for ch, _ in indexed]
+
+
+def spread_across(frame, ordered, spread_deg):
+    """Fan frame hue across ordered channels. Returns {str(id): (r,g,b)}."""
+    colors = {}
+    last = len(ordered) - 1
+    for i, ch in enumerate(ordered):
+        rank = 0.5 if last == 0 else i / last
+        hue = frame['hue'] + (rank - 0.5) * spread_deg
+        colors[str(ch)] = hsv_to_rgb(hue, frame['saturation'], frame['value'])
+    return colors
