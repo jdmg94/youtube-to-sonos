@@ -4,7 +4,12 @@ Ports palette logic from web/src/lib/hue.ts to run autonomously on the backend.
 """
 import re
 import math
+import threading
+import time
+import logging
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 REPORTED_POSITION_BIAS_SECONDS = 0.5
 RESYNC_THRESHOLD_SECONDS = 0.75
@@ -297,3 +302,119 @@ def resolve_settings(settings):
         'spreadDeg': SPREAD_MAX_DEG * spread,
         'tauSeconds': TAU_MIN_SECONDS * (TAU_MAX_SECONDS / TAU_MIN_SECONDS) ** transition,
     }
+
+
+class RenderLoop:
+    """Autonomous 16 Hz render loop that generates colors from speaker position."""
+
+    def __init__(self, session, speaker, cache_dir, settings):
+        self.session = session
+        self.speaker = speaker
+        self.cache_dir = cache_dir
+        self.settings = settings
+        self._stop = threading.Event()
+        self._thread = None
+        self.clock = None
+        self.renderer = None
+        self.current_track = None
+        self.eased = None
+        self.last_tick_ms = None
+
+    def start(self):
+        """Spawn render thread."""
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name='hue-render', daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        """Signal stop and wait for thread exit."""
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+            self._thread = None
+
+    def update_settings(self, settings):
+        """Update brightness/transition/spread live. Thread-safe (atomic replacement)."""
+        self.settings = settings
+
+    def _run(self):
+        """Main loop: tick every 60ms."""
+        while not self._stop.is_set():
+            try:
+                self._tick()
+            except Exception as e:
+                logger.error(f"Hue render loop error: {e}")
+            self._stop.wait(0.060)  # 16.67 Hz
+
+    def _tick(self):
+        """One render cycle: query speaker, generate colors, send."""
+        import analysis  # Import here to avoid circular dependency
+
+        now_ms = time.monotonic() * 1000
+
+        # Query speaker
+        try:
+            track_info = self.speaker.get_current_track_info()
+            # Extract video_id from URI (defined in app.py as _video_id_from_uri)
+            uri = track_info.get('uri', '')
+            # Parse /media/<id>.mp3
+            match = re.search(r'/media/([^/]+)\.mp3', uri)
+            video_id = match.group(1) if match else None
+
+            position_str = track_info.get('position', '')
+            transport = self.speaker.get_current_transport_info()
+            playing = transport.get('current_transport_state') == 'PLAYING'
+        except Exception as e:
+            logger.warning(f"Hue render: could not query speaker: {e}")
+            video_id, position_str, playing = None, None, False
+
+        # Load analysis if track changed
+        if video_id != self.current_track:
+            self.current_track = video_id
+            self.renderer = None
+            self.clock = None
+            if video_id:
+                data = analysis.load(self.cache_dir, video_id)
+                if data:
+                    self.renderer = create_renderer(data)
+
+        # Sync clock
+        reported_seconds = parse_sonos_time(position_str)
+        if reported_seconds is not None:
+            self.clock = sync_clock(self.clock, reported_seconds, now_ms, playing)
+
+        # Compute target colors
+        if self.renderer and self.clock:
+            resolved = resolve_settings(self.settings)
+            t = position_at(self.clock, now_ms)
+            frame = self.renderer.frame_at(t, resolved)
+
+            ordered = order_channels(self.session.channels, self.session.positions or {})
+            if ordered:
+                target = spread_across(frame, ordered, resolved['spreadDeg'])
+            else:
+                # Whole-room mode
+                target = {'*': hsv_to_rgb(frame['hue'], frame['saturation'], frame['value'])}
+        else:
+            # Idle: no analysis or no track
+            target = {'*': IDLE_COLOR}
+
+        # Ease toward target
+        dt = (now_ms - self.last_tick_ms) / 1000 if self.last_tick_ms else float('inf')
+        self.last_tick_ms = now_ms
+        self.eased = ease_channels(self.eased, target, dt, resolve_settings(self.settings)['tauSeconds'])
+
+        # Round and send if changed
+        next_colors = {k: round_rgb(v) for k, v in self.eased.items()}
+        if any_differs_enough(next_colors, self.session.last_sent):
+            payload = next_colors['*'] if '*' in next_colors else next_colors
+            self.session.set_color(payload)
+            self.session.last_sent = next_colors
+
+        # Publish for SSE preview
+        if '*' in next_colors:
+            ordered_colors = [next_colors['*']]
+        else:
+            ordered = order_channels(self.session.channels, self.session.positions or {})
+            ordered_colors = [next_colors[str(ch)] for ch in ordered]
+        self.session.set_current_colors(ordered_colors)

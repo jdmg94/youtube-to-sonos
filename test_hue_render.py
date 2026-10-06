@@ -1,9 +1,13 @@
 import unittest
+from unittest.mock import Mock
+import threading
+import time
 from hue_render import (
     parse_sonos_time, Clock, position_at, sync_clock, hsv_to_rgb, sample,
     last_beat_index, create_renderer, order_channels, spread_across,
     ease_toward, resolve_settings, DEFAULT_SETTINGS, BRIGHTNESS_FLOOR,
-    DECAY_MIN, DECAY_MAX, SPREAD_MAX_DEG, TAU_MIN_SECONDS, TAU_MAX_SECONDS
+    DECAY_MIN, DECAY_MAX, SPREAD_MAX_DEG, TAU_MIN_SECONDS, TAU_MAX_SECONDS,
+    RenderLoop
 )
 
 
@@ -271,3 +275,62 @@ class ResolveSettings(unittest.TestCase):
         resolved_max = resolve_settings({'brightness': 100, 'transition': 100, 'spread': 0})
         self.assertAlmostEqual(resolved_min['tauSeconds'], TAU_MIN_SECONDS)
         self.assertAlmostEqual(resolved_max['tauSeconds'], TAU_MAX_SECONDS)
+
+
+class RenderLoopLifecycle(unittest.TestCase):
+    def test_starts_and_stops_cleanly(self):
+        session = Mock()
+        session.channels = [0, 1]
+        session.positions = {}
+        session.set_color = Mock()
+        session.set_current_colors = Mock()
+        session.last_sent = None
+
+        speaker = Mock()
+        speaker.get_current_track_info.return_value = {'uri': '', 'position': '0:00:00'}
+        speaker.get_current_transport_info.return_value = {'current_transport_state': 'PAUSED'}
+
+        loop = RenderLoop(session, speaker, '/tmp', {'brightness': 100, 'transition': 25, 'spread': 15})
+
+        # Should not be running yet
+        self.assertIsNone(loop._thread)
+
+        loop.start()
+        # Thread should spawn
+        self.assertIsNotNone(loop._thread)
+        self.assertTrue(loop._thread.is_alive())
+
+        # Let it tick at least once
+        time.sleep(0.1)
+
+        loop.stop()
+        # Thread should be None or dead
+        if loop._thread:
+            self.assertFalse(loop._thread.is_alive())
+        # After stop(), thread is set to None
+        else:
+            self.assertIsNone(loop._thread)
+
+    def test_update_settings_while_running(self):
+        session = Mock()
+        session.channels = [0]
+        session.positions = {}
+        session.set_color = Mock()
+        session.set_current_colors = Mock()
+        session.last_sent = None
+
+        speaker = Mock()
+        speaker.get_current_track_info.return_value = {'uri': '', 'position': '0:00:00'}
+        speaker.get_current_transport_info.return_value = {'current_transport_state': 'PAUSED'}
+
+        loop = RenderLoop(session, speaker, '/tmp', {'brightness': 100, 'transition': 25, 'spread': 15})
+        loop.start()
+
+        # Update settings
+        new_settings = {'brightness': 50, 'transition': 75, 'spread': 30}
+        loop.update_settings(new_settings)
+
+        # Should update immediately (atomic dict replacement)
+        self.assertEqual(loop.settings, new_settings)
+
+        loop.stop()
