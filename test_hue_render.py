@@ -1,5 +1,5 @@
 import unittest
-from hue_render import parse_sonos_time, Clock, position_at, sync_clock
+from hue_render import parse_sonos_time, Clock, position_at, sync_clock, hsv_to_rgb, sample, last_beat_index
 
 
 class ParseSonosTime(unittest.TestCase):
@@ -50,3 +50,53 @@ class SyncClock(unittest.TestCase):
         clock = sync_clock(prev, 10.0, 1100.0, False)
         self.assertEqual(clock.position, 10.5)
         self.assertFalse(clock.running)
+
+
+class HsvToRgb(unittest.TestCase):
+    def test_pure_red(self):
+        self.assertEqual(hsv_to_rgb(0, 1, 1), (255, 0, 0))
+
+    def test_pure_green(self):
+        self.assertEqual(hsv_to_rgb(120, 1, 1), (0, 255, 0))
+
+    def test_pure_blue(self):
+        self.assertEqual(hsv_to_rgb(240, 1, 1), (0, 0, 255))
+
+    def test_desaturated_is_grey(self):
+        self.assertEqual(hsv_to_rgb(180, 0, 0.5), (128, 128, 128))
+
+    def test_wraps_negative_hue(self):
+        self.assertEqual(hsv_to_rgb(-60, 1, 1), hsv_to_rgb(300, 1, 1))
+
+
+class Sample(unittest.TestCase):
+    def test_interpolates_between_frames(self):
+        values = [0.0, 1.0]
+        # At t=0.05 (halfway between frames at 0.1s spacing)
+        self.assertAlmostEqual(sample(values, 0.1, 0.05), 0.5)
+
+    def test_clamps_before_start(self):
+        self.assertEqual(sample([5.0, 10.0], 0.1, -1.0), 5.0)
+
+    def test_clamps_after_end(self):
+        self.assertEqual(sample([5.0, 10.0], 0.1, 10.0), 10.0)
+
+    def test_empty_array_returns_zero(self):
+        self.assertEqual(sample([], 0.1, 5.0), 0.0)
+
+
+class LastBeatIndex(unittest.TestCase):
+    def test_before_first_beat(self):
+        self.assertEqual(last_beat_index([1.0, 2.0, 3.0], 0.5), -1)
+
+    def test_exactly_on_beat(self):
+        self.assertEqual(last_beat_index([1.0, 2.0, 3.0], 2.0), 1)
+
+    def test_between_beats(self):
+        self.assertEqual(last_beat_index([1.0, 2.0, 3.0], 2.5), 1)
+
+    def test_after_last_beat(self):
+        self.assertEqual(last_beat_index([1.0, 2.0, 3.0], 10.0), 2)
+
+    def test_empty_beats(self):
+        self.assertEqual(last_beat_index([], 5.0), -1)
