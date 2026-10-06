@@ -37,6 +37,7 @@ function health(overrides: Partial<HueHealth> = {}): HueHealth {
     area: null,
     channels: [],
     error: null,
+    current_colors: null,
     ...overrides,
   };
 }

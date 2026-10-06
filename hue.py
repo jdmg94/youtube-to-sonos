@@ -573,10 +573,11 @@ class HueSession:
     fresh object graph.
     """
 
-    def __init__(self, client, area_id, channels):
+    def __init__(self, client, area_id, channels, positions=None):
         self.client = client
         self.area_id = area_id
         self.channels = list(channels)
+        self.positions = positions or {}  # {channel_id: {'x': float, 'y': float, 'z': float}}
         self.profile = None
 
         self._socket = None
@@ -592,6 +593,13 @@ class HueSession:
         # How the room looked before we took it over, taken at `start()` and
         # spent at `stop()`.
         self._restore = None
+
+        # Render loop fields
+        self.render_loop = None
+        self.settings = None
+        self.last_sent = None
+        self._current_colors = None
+        self._colors_lock = threading.Lock()
 
     # -- lifecycle
 
@@ -626,6 +634,9 @@ class HueSession:
         return self
 
     def stop(self):
+        # Stop render loop first, before DTLS teardown
+        self.stop_render_loop()
+
         self._stop.set()
         thread, self._thread = self._thread, None
         if thread is not None:
@@ -692,6 +703,40 @@ class HueSession:
             colors = {c: rgb for c in self.channels}
         with self._lock:
             self._colors = colors
+
+    # -- render loop
+
+    def start_render_loop(self, speaker, cache_dir, settings):
+        """Spawn autonomous render loop."""
+        if self.render_loop is not None:
+            self.render_loop.stop()
+
+        import hue_render
+        self.settings = settings
+        self.render_loop = hue_render.RenderLoop(self, speaker, cache_dir, settings)
+        self.render_loop.start()
+
+    def stop_render_loop(self):
+        """Stop render loop gracefully."""
+        if self.render_loop is not None:
+            self.render_loop.stop()
+            self.render_loop = None
+
+    def update_settings(self, settings):
+        """Update brightness/transition/spread on running stream."""
+        self.settings = settings
+        if self.render_loop:
+            self.render_loop.update_settings(settings)
+
+    def get_current_colors(self):
+        """Thread-safe read for SSE. Returns list of RGB tuples or None."""
+        with self._colors_lock:
+            return self._current_colors
+
+    def set_current_colors(self, colors):
+        """Called by render loop to publish colors for SSE."""
+        with self._colors_lock:
+            self._current_colors = colors
 
     # -- internals
 

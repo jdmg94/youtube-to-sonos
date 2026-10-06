@@ -19,11 +19,12 @@ import type {
   HueHealth,
   HueLight,
   HuePairResponse,
+  HueSettings,
+  HueSettingsResponse,
   HueStreamResponse,
   NowPlaying,
   PlayRequest,
   PlayResponse,
-  Rgb,
   Station,
   StationRefreshResponse,
   StationRemoveRequest,
@@ -63,14 +64,6 @@ const DISCOVERY_TIMEOUT_MS = 30_000;
  * watching, and timing out on it would abort a stream that is about to come up.
  */
 const HUE_STREAM_TIMEOUT_MS = 45_000;
-
-/**
- * A colour frame, unlike everything else here, has a deadline: it is one sample
- * of a render loop running many times a second, and a frame that takes longer
- * than this has already been superseded by the next one. Failing fast keeps a
- * stalled backend from accumulating in-flight requests.
- */
-const HUE_COLOR_TIMEOUT_MS = 2_000;
 
 /**
  * A failed API call. Carries the HTTP status and the yt-dlp failure flags so
@@ -338,10 +331,15 @@ export const api = {
       { signal },
     ),
 
-  hueStartStream: (area?: string, signal?: AbortSignal) =>
+  hueStartStream: (
+    area?: string,
+    speaker_ip?: string,
+    settings?: HueSettings,
+    signal?: AbortSignal,
+  ) =>
     request<HueStreamResponse>("/api/hue/stream", {
       method: "POST",
-      body: { action: "start", area },
+      body: { action: "start", area, speaker_ip, settings },
       timeoutMs: HUE_STREAM_TIMEOUT_MS,
       signal,
     }),
@@ -353,19 +351,10 @@ export const api = {
       signal,
     }),
 
-  /**
-   * Push one colour at the running stream. Separate from `hueStartStream` only
-   * for its timeout: this is the render loop's hot path.
-   *
-   * The backend's writer thread keeps resending whatever it last held at 25 Hz,
-   * so this is a *setpoint*, not a frame — dropping one costs nothing and the
-   * caller should never queue or retry them.
-   */
-  hueColor: (color: Rgb | Record<string, Rgb>, signal?: AbortSignal) =>
-    request<HueStreamResponse>("/api/hue/stream", {
+  hueUpdateSettings: (settings: HueSettings, signal?: AbortSignal) =>
+    request<HueSettingsResponse>("/api/hue/settings", {
       method: "POST",
-      body: { action: "color", color },
-      timeoutMs: HUE_COLOR_TIMEOUT_MS,
+      body: settings,
       signal,
     }),
 };

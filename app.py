@@ -3063,6 +3063,9 @@ def events():
                 with _STATE_LOCK:
                     station = STATION.get(speaker.ip_address)
                 data['station'] = station_payload(station)
+                # Include current colors for SSE preview
+                session = _HUE_SESSION
+                data['hue_colors'] = session.get_current_colors() if session else None
                 payload = json.dumps(data)
             except Exception as e:
                 payload = json.dumps({"error": str(e)})
@@ -3225,6 +3228,7 @@ def hue_health():
         "area": session.area_id if session else None,
         "channels": session.channels if session else [],
         "error": session.error if session else None,
+        "current_colors": session.get_current_colors() if session else None,
     })
 
 
@@ -3330,10 +3334,10 @@ def hue_analysis(video_id):
 
 @app.route('/api/hue/stream', methods=['POST'])
 def hue_stream():
-    """Start or stop the light stream, or push a colour at a running one.
+    """Start or stop the light stream.
 
-    {"action": "start", "area": "<id>"} | {"action": "stop"}
-              | {"action": "color", "color": [r, g, b]}
+    {"action": "start", "area": "<id>", "speaker_ip": "<ip>", "settings": {...}}
+    {"action": "stop"}
     """
     global _HUE_SESSION
     data = request.get_json(silent=True) or {}
@@ -3347,18 +3351,6 @@ def hue_stream():
             return jsonify({"streaming": False})
 
         with _HUE_LOCK:
-            if action == 'color':
-                if _HUE_SESSION is None or not _HUE_SESSION.is_active():
-                    return jsonify({"error": "Not streaming"}), 409
-                # Absent rather than defaulted to black: a body that misspells
-                # the key would otherwise blank the lights and report success,
-                # which reads as "the stream is broken" rather than "you sent
-                # the wrong field".
-                if 'color' not in data:
-                    return jsonify({"error": "Missing 'color'"}), 400
-                _HUE_SESSION.set_color(data['color'])
-                return jsonify({"streaming": True})
-
             if action != 'start':
                 return jsonify({"error": f"Unknown action {action!r}"}), 400
 
@@ -3391,14 +3383,51 @@ def hue_stream():
                 _HUE_SESSION.stop()
                 _HUE_SESSION = None
 
-            session = hue.HueSession(client, area_id, area['channels'])
+            session = hue.HueSession(client, area_id, area['channels'], area.get('positions'))
             session.start()
             _HUE_SESSION = session
+
+            # Start render loop if speaker and settings provided
+            speaker_ip = data.get('speaker_ip')
+            settings = data.get('settings')
+            if speaker_ip and settings:
+                speaker = _resolve_speaker(speaker_ip)
+                if speaker:
+                    session.start_render_loop(speaker, CACHE_DIR, settings)
+
             return jsonify({"streaming": True, "area": area_id,
                             "channels": session.channels,
                             "psk_profile": session.profile})
     except Exception as e:
         return _hue_error(e)
+
+
+@app.route('/api/hue/settings', methods=['POST'])
+def hue_settings():
+    """Update brightness/transition/spread on running stream.
+
+    POST {"brightness": 0-100, "transition": 0-100, "spread": 0-100}
+    """
+    global _HUE_SESSION
+    data = request.get_json(silent=True) or {}
+
+    try:
+        with _HUE_LOCK:
+            if _HUE_SESSION is None or not _HUE_SESSION.is_active():
+                return jsonify({"error": "Not streaming"}), 409
+
+            # Validate settings
+            for key in ['brightness', 'transition', 'spread']:
+                if key in data:
+                    val = data[key]
+                    if not isinstance(val, (int, float)) or not (0 <= val <= 100):
+                        return jsonify({"error": f"{key} must be 0-100"}), 400
+
+            _HUE_SESSION.update_settings(data)
+            return jsonify({"settings": _HUE_SESSION.settings})
+    except Exception as e:
+        return _hue_error(e)
+
 
 # --- Serving cached media to Sonos -------------------------------------------
 

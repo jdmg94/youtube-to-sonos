@@ -12,6 +12,7 @@ Run: .venv/bin/python -m unittest test_hue -v
 """
 
 import unittest
+from unittest.mock import Mock
 
 from hue import HueSession, area_light_ids, restore_payload
 
@@ -279,6 +280,37 @@ class SessionRestore(unittest.TestCase):
 
         self.assertEqual(client.calls[-2:],
                          [('area', 'stop'), ('restore', ['l'])])
+
+
+class HueSessionRenderLoop(unittest.TestCase):
+    def test_start_render_loop_spawns_thread(self):
+        client = Mock()
+        session = HueSession(client, 'area-1', [0, 1])
+
+        speaker = Mock()
+        speaker.get_current_track_info.return_value = {'uri': '', 'position': '0:00:00'}
+        speaker.get_current_transport_info.return_value = {'current_transport_state': 'PAUSED'}
+
+        session.start_render_loop(speaker, '/tmp', {'brightness': 100, 'transition': 25, 'spread': 15})
+
+        self.assertIsNotNone(session.render_loop)
+        self.assertIsNotNone(session.render_loop._thread)
+
+        session.stop_render_loop()
+
+    def test_get_set_current_colors_thread_safe(self):
+        client = Mock()
+        session = HueSession(client, 'area-1', [0, 1])
+
+        # Initially None
+        self.assertIsNone(session.get_current_colors())
+
+        # Set colors
+        colors = [(255, 0, 0), (0, 255, 0)]
+        session.set_current_colors(colors)
+
+        # Read back
+        self.assertEqual(session.get_current_colors(), colors)
 
 
 if __name__ == '__main__':
