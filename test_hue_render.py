@@ -1,5 +1,10 @@
 import unittest
-from hue_render import parse_sonos_time, Clock, position_at, sync_clock, hsv_to_rgb, sample, last_beat_index, create_renderer, order_channels, spread_across
+from hue_render import (
+    parse_sonos_time, Clock, position_at, sync_clock, hsv_to_rgb, sample,
+    last_beat_index, create_renderer, order_channels, spread_across,
+    ease_toward, resolve_settings, DEFAULT_SETTINGS, BRIGHTNESS_FLOOR,
+    DECAY_MIN, DECAY_MAX, SPREAD_MAX_DEG, TAU_MIN_SECONDS, TAU_MAX_SECONDS
+)
 
 
 class ParseSonosTime(unittest.TestCase):
@@ -222,3 +227,47 @@ class SpreadAcross(unittest.TestCase):
         self.assertIsInstance(colors['0'], tuple)
         self.assertEqual(len(colors['0']), 3)
         self.assertTrue(all(0 <= c <= 255 for c in colors['0']))
+
+
+class EaseToward(unittest.TestCase):
+    def test_approaches_target_exponentially(self):
+        prev = (100.0, 100.0, 100.0)
+        target = (200.0, 200.0, 200.0)
+        # dt=0.1, tau=0.2 -> alpha ≈ 0.393
+        eased = ease_toward(prev, target, 0.1, 0.2)
+        # Should move ~39% toward target
+        self.assertGreater(eased[0], 100.0)
+        self.assertLess(eased[0], 200.0)
+
+    def test_snap_when_dt_equals_infinity(self):
+        prev = (100.0, 100.0, 100.0)
+        target = (200.0, 200.0, 200.0)
+        eased = ease_toward(prev, target, float('inf'), 0.2)
+        self.assertEqual(eased, target)
+
+    def test_returns_floats(self):
+        eased = ease_toward((100.0, 100.0, 100.0), (150.0, 150.0, 150.0), 0.1, 0.2)
+        self.assertIsInstance(eased[0], float)
+
+
+class ResolveSettings(unittest.TestCase):
+    def test_default_settings(self):
+        resolved = resolve_settings(DEFAULT_SETTINGS)
+        self.assertEqual(resolved['brightness'], 1.0)  # 100 -> 1.0
+        # transition=25 -> beatDecay between MIN and MAX
+        self.assertGreater(resolved['beatDecay'], DECAY_MIN)
+        self.assertLess(resolved['beatDecay'], DECAY_MAX)
+
+    def test_brightness_floor(self):
+        resolved = resolve_settings({'brightness': 0, 'transition': 50, 'spread': 0})
+        self.assertEqual(resolved['brightness'], BRIGHTNESS_FLOOR)
+
+    def test_spread_scales_linearly(self):
+        resolved = resolve_settings({'brightness': 100, 'transition': 50, 'spread': 50})
+        self.assertAlmostEqual(resolved['spreadDeg'], SPREAD_MAX_DEG * 0.5)
+
+    def test_tau_scales_geometrically(self):
+        resolved_min = resolve_settings({'brightness': 100, 'transition': 0, 'spread': 0})
+        resolved_max = resolve_settings({'brightness': 100, 'transition': 100, 'spread': 0})
+        self.assertAlmostEqual(resolved_min['tauSeconds'], TAU_MIN_SECONDS)
+        self.assertAlmostEqual(resolved_max['tauSeconds'], TAU_MAX_SECONDS)

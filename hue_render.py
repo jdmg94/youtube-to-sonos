@@ -3,6 +3,7 @@
 Ports palette logic from web/src/lib/hue.ts to run autonomously on the backend.
 """
 import re
+import math
 from dataclasses import dataclass
 
 REPORTED_POSITION_BIAS_SECONDS = 0.5
@@ -28,6 +29,7 @@ TAU_MAX_SECONDS = 2.0
 COLOR_EPSILON = 3
 IDLE_COLOR = (60, 45, 30)
 POSITION_EPSILON = 1e-6
+DEFAULT_SETTINGS = {'brightness': 100, 'transition': 25, 'spread': 15}
 
 
 @dataclass
@@ -231,3 +233,67 @@ def spread_across(frame, ordered, spread_deg):
         hue = frame['hue'] + (rank - 0.5) * spread_deg
         colors[str(ch)] = hsv_to_rgb(hue, frame['saturation'], frame['value'])
     return colors
+
+
+def ease_toward(prev, target, dt_seconds, tau_seconds):
+    """Exponential approach from prev to target. Returns float RGB."""
+    if tau_seconds <= 0 or dt_seconds <= 0:
+        alpha = 1.0
+    else:
+        alpha = 1 - math.exp(-dt_seconds / tau_seconds)
+
+    return (
+        prev[0] + (target[0] - prev[0]) * alpha,
+        prev[1] + (target[1] - prev[1]) * alpha,
+        prev[2] + (target[2] - prev[2]) * alpha,
+    )
+
+
+def ease_channels(prev, target, dt_seconds, tau_seconds):
+    """Ease across all channels. Target's keys win; new channels ease from IDLE_COLOR."""
+    eased = {}
+    for key in target:
+        prev_color = prev.get(key, IDLE_COLOR) if prev else IDLE_COLOR
+        # Convert to float if prev was int (from IDLE_COLOR)
+        prev_float = tuple(float(c) for c in prev_color)
+        target_float = tuple(float(c) for c in target[key])
+        eased[key] = ease_toward(prev_float, target_float, dt_seconds, tau_seconds)
+    return eased
+
+
+def round_rgb(rgb):
+    """Float RGB to 8-bit integers."""
+    return (round(rgb[0]), round(rgb[1]), round(rgb[2]))
+
+
+def differs_enough(a, b, epsilon=COLOR_EPSILON):
+    """Whether two RGB colors differ by at least epsilon on any channel."""
+    return (abs(a[0] - b[0]) >= epsilon or
+            abs(a[1] - b[1]) >= epsilon or
+            abs(a[2] - b[2]) >= epsilon)
+
+
+def any_differs_enough(next_colors, last_sent, epsilon=COLOR_EPSILON):
+    """Whether any channel in next differs from last, or channel set changed."""
+    if last_sent is None:
+        return True
+    if set(next_colors.keys()) != set(last_sent.keys()):
+        return True
+    for key in next_colors:
+        if differs_enough(next_colors[key], last_sent[key], epsilon):
+            return True
+    return False
+
+
+def resolve_settings(settings):
+    """Slider positions (0-100) to palette units."""
+    brightness = max(0, min(100, settings.get('brightness', 100))) / 100
+    transition = max(0, min(100, settings.get('transition', 25))) / 100
+    spread = max(0, min(100, settings.get('spread', 15))) / 100
+
+    return {
+        'brightness': BRIGHTNESS_FLOOR + (1 - BRIGHTNESS_FLOOR) * brightness,
+        'beatDecay': DECAY_MIN + (DECAY_MAX - DECAY_MIN) * transition,
+        'spreadDeg': SPREAD_MAX_DEG * spread,
+        'tauSeconds': TAU_MIN_SECONDS * (TAU_MAX_SECONDS / TAU_MIN_SECONDS) ** transition,
+    }
