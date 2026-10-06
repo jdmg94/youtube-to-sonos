@@ -305,6 +305,8 @@ export interface NowPlaying {
 /** A `data:` frame from `/api/events`: now-playing plus the station. */
 export interface EventFrame extends NowPlaying {
   station: StationBody;
+  /** Server-generated colors for preview. Same as `HueHealth.current_colors`. */
+  hue_colors: Rgb[] | null;
 }
 
 /**
@@ -443,6 +445,11 @@ export interface HueHealth {
    * `streaming: false`.
    */
   error: string | null;
+  /**
+   * Server-generated colors for preview. List of RGB tuples, one per channel
+   * in order, or `null` when not rendering.
+   */
+  current_colors: Rgb[] | null;
 }
 
 export interface HuePairResponse {
@@ -504,11 +511,16 @@ export interface ChannelPosition {
 /** `[r, g, b]`, each 0–255. Out-of-range components are clamped server-side. */
 export type Rgb = [r: number, g: number, b: number];
 
+/** Settings for server-side render loop. All values 0-100. */
+export interface HueSettings {
+  brightness: number;
+  transition: number;
+  spread: number;
+}
+
 export type HueStreamRequest =
-  | { action: "start"; area?: string }
-  | { action: "stop" }
-  /** A bare `Rgb` drives every channel; the map addresses them individually. */
-  | { action: "color"; color: Rgb | Record<string, Rgb> };
+  | { action: "start"; area?: string; speaker_ip?: string; settings?: HueSettings }
+  | { action: "stop" };
 
 export interface HueStreamStarted {
   streaming: true;
@@ -521,11 +533,12 @@ export interface HueStreamStopped {
   streaming: false;
 }
 
-/** `color` answers `{streaming: true}` with no area — discriminate on the key. */
-export type HueStreamResponse =
-  | HueStreamStarted
-  | HueStreamStopped
-  | { streaming: true };
+export type HueStreamResponse = HueStreamStarted | HueStreamStopped;
+
+/** POST /api/hue/settings */
+export interface HueSettingsResponse {
+  settings: HueSettings;
+}
 
 /**
  * Beat and timbre features for one track, from `analysis.py`.

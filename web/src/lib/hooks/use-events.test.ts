@@ -90,6 +90,7 @@ function frame(overrides: Partial<EventFrame> = {}): EventFrame {
     device: "Kitchen",
     device_ip: "10.0.0.1",
     station: { index: 0, exhausted: false, tracks: [] },
+    hue_colors: null,
     ...overrides,
   };
 }
