@@ -3397,6 +3397,34 @@ def hue_stream():
     except Exception as e:
         return _hue_error(e)
 
+
+@app.route('/api/hue/settings', methods=['POST'])
+def hue_settings():
+    """Update brightness/transition/spread on running stream.
+
+    POST {"brightness": 0-100, "transition": 0-100, "spread": 0-100}
+    """
+    global _HUE_SESSION
+    data = request.get_json(silent=True) or {}
+
+    try:
+        with _HUE_LOCK:
+            if _HUE_SESSION is None or not _HUE_SESSION.is_active():
+                return jsonify({"error": "Not streaming"}), 409
+
+            # Validate settings
+            for key in ['brightness', 'transition', 'spread']:
+                if key in data:
+                    val = data[key]
+                    if not isinstance(val, (int, float)) or not (0 <= val <= 100):
+                        return jsonify({"error": f"{key} must be 0-100"}), 400
+
+            _HUE_SESSION.update_settings(data)
+            return jsonify({"settings": _HUE_SESSION.settings})
+    except Exception as e:
+        return _hue_error(e)
+
+
 # --- Serving cached media to Sonos -------------------------------------------
 
 MEDIA_CHUNK = 32768
