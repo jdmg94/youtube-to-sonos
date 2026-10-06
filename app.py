@@ -3063,6 +3063,9 @@ def events():
                 with _STATE_LOCK:
                     station = STATION.get(speaker.ip_address)
                 data['station'] = station_payload(station)
+                # Include current colors for SSE preview
+                session = _HUE_SESSION
+                data['hue_colors'] = session.get_current_colors() if session else None
                 payload = json.dumps(data)
             except Exception as e:
                 payload = json.dumps({"error": str(e)})
@@ -3225,6 +3228,7 @@ def hue_health():
         "area": session.area_id if session else None,
         "channels": session.channels if session else [],
         "error": session.error if session else None,
+        "current_colors": session.get_current_colors() if session else None,
     })
 
 
