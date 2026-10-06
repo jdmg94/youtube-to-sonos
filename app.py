@@ -3330,10 +3330,10 @@ def hue_analysis(video_id):
 
 @app.route('/api/hue/stream', methods=['POST'])
 def hue_stream():
-    """Start or stop the light stream, or push a colour at a running one.
+    """Start or stop the light stream.
 
-    {"action": "start", "area": "<id>"} | {"action": "stop"}
-              | {"action": "color", "color": [r, g, b]}
+    {"action": "start", "area": "<id>", "speaker_ip": "<ip>", "settings": {...}}
+    {"action": "stop"}
     """
     global _HUE_SESSION
     data = request.get_json(silent=True) or {}
@@ -3347,18 +3347,6 @@ def hue_stream():
             return jsonify({"streaming": False})
 
         with _HUE_LOCK:
-            if action == 'color':
-                if _HUE_SESSION is None or not _HUE_SESSION.is_active():
-                    return jsonify({"error": "Not streaming"}), 409
-                # Absent rather than defaulted to black: a body that misspells
-                # the key would otherwise blank the lights and report success,
-                # which reads as "the stream is broken" rather than "you sent
-                # the wrong field".
-                if 'color' not in data:
-                    return jsonify({"error": "Missing 'color'"}), 400
-                _HUE_SESSION.set_color(data['color'])
-                return jsonify({"streaming": True})
-
             if action != 'start':
                 return jsonify({"error": f"Unknown action {action!r}"}), 400
 
@@ -3391,9 +3379,18 @@ def hue_stream():
                 _HUE_SESSION.stop()
                 _HUE_SESSION = None
 
-            session = hue.HueSession(client, area_id, area['channels'])
+            session = hue.HueSession(client, area_id, area['channels'], area.get('positions'))
             session.start()
             _HUE_SESSION = session
+
+            # Start render loop if speaker and settings provided
+            speaker_ip = data.get('speaker_ip')
+            settings = data.get('settings')
+            if speaker_ip and settings:
+                speaker = _resolve_speaker(speaker_ip)
+                if speaker:
+                    session.start_render_loop(speaker, CACHE_DIR, settings)
+
             return jsonify({"streaming": True, "area": area_id,
                             "channels": session.channels,
                             "psk_profile": session.profile})
