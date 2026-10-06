@@ -1,5 +1,5 @@
 import unittest
-from hue_render import parse_sonos_time, Clock, position_at, sync_clock, hsv_to_rgb, sample, last_beat_index
+from hue_render import parse_sonos_time, Clock, position_at, sync_clock, hsv_to_rgb, sample, last_beat_index, create_renderer
 
 
 class ParseSonosTime(unittest.TestCase):
@@ -100,3 +100,64 @@ class LastBeatIndex(unittest.TestCase):
 
     def test_empty_beats(self):
         self.assertEqual(last_beat_index([], 5.0), -1)
+
+
+class CreateRenderer(unittest.TestCase):
+    def test_creates_renderer_from_analysis(self):
+        analysis = {
+            'tempo': 120,
+            'beats': [0.5, 1.0, 1.5],
+            'energy': [0.3, 0.7],
+            'brightness': [0.2, 0.8],
+            'frame_seconds': 0.1,
+        }
+        renderer = create_renderer(analysis)
+        self.assertIsNotNone(renderer)
+        # Should have frame_at method
+        frame = renderer.frame_at(0.5)
+        self.assertIn('hue', frame)
+        self.assertIn('saturation', frame)
+        self.assertIn('value', frame)
+
+    def test_normalizes_brightness_range(self):
+        analysis = {
+            'tempo': 120,
+            'beats': [],
+            'energy': [0.5],
+            'brightness': [0.2, 0.3, 0.4, 0.5, 0.6],  # narrow span
+            'frame_seconds': 0.1,
+        }
+        renderer = create_renderer(analysis)
+        # Access brightness_range (stored for debugging)
+        self.assertIsNotNone(renderer.brightness_range)
+
+
+class FrameAt(unittest.TestCase):
+    def test_beat_increases_value(self):
+        analysis = {
+            'tempo': 120,
+            'beats': [1.0],
+            'energy': [0.5],
+            'brightness': [0.5],
+            'frame_seconds': 0.1,
+        }
+        renderer = create_renderer(analysis)
+        # Exactly on beat
+        on_beat = renderer.frame_at(1.0)
+        # Slightly after
+        after_beat = renderer.frame_at(1.1)
+        # Beat should lift value
+        self.assertGreater(on_beat['value'], after_beat['value'])
+
+    def test_quiet_passage_not_black(self):
+        analysis = {
+            'tempo': 120,
+            'beats': [],
+            'energy': [0.0],  # silent
+            'brightness': [0.5],
+            'frame_seconds': 0.1,
+        }
+        renderer = create_renderer(analysis)
+        frame = renderer.frame_at(0.5)
+        # MIN_VALUE = 0.15, so should be at least that
+        self.assertGreaterEqual(frame['value'], 0.15)

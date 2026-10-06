@@ -122,3 +122,73 @@ def last_beat_index(beats, t):
         else:
             hi = mid - 1
     return found
+
+
+class Renderer:
+    """Per-track palette with brightness normalization."""
+
+    def __init__(self, analysis):
+        self.beats = analysis['beats']
+        self.energy = analysis['energy']
+        self.brightness = analysis['brightness']
+        self.frame_seconds = analysis['frame_seconds']
+        self.tempo = analysis['tempo']
+
+        # Normalize brightness to arc
+        sorted_b = sorted(self.brightness)
+        lo = self._quantile(sorted_b, BRIGHTNESS_TRIM)
+        hi = self._quantile(sorted_b, 1 - BRIGHTNESS_TRIM)
+        if hi - lo < MIN_BRIGHTNESS_SPAN:
+            lo, hi = 0.0, 1.0
+        self.brightness_range = (lo, hi)
+        self._b_lo = lo
+        self._b_span = hi - lo
+
+        self._fallback_period = 60 / self.tempo if self.tempo > 0 else 0.5
+
+    @staticmethod
+    def _quantile(sorted_values, q):
+        """Order statistic with linear interpolation."""
+        if not sorted_values:
+            return 0.0
+        pos = (len(sorted_values) - 1) * q
+        i = int(pos)
+        next_i = min(i + 1, len(sorted_values) - 1)
+        return sorted_values[i] + (sorted_values[next_i] - sorted_values[i]) * (pos - i)
+
+    def frame_at(self, t, options=None):
+        """Room color at time t. Returns {hue, saturation, value}."""
+        options = options or {}
+        brightness_gain = options.get('brightness', 1.0)
+        beat_decay = options.get('beatDecay', BEAT_DECAY_FRACTION)
+        spread_deg = options.get('spreadDeg', 0.0)
+
+        loudness = clamp01(sample(self.energy, self.frame_seconds, t))
+        timbre = clamp01((sample(self.brightness, self.frame_seconds, t) - self._b_lo) / self._b_span) if self._b_span > 0 else 0.5
+
+        # Beat pulse
+        i = last_beat_index(self.beats, t)
+        if i < 0:
+            pulse = 0.0
+        else:
+            period = self.beats[i] - self.beats[i - 1] if i > 0 else self._fallback_period
+            decay = max(period, MIN_BEAT_PERIOD_SECONDS) * beat_decay
+            pulse = 2.71828 ** (-(t - self.beats[i]) / decay)  # exp(-x)
+
+        # Arc reduction for spread
+        margin = max(0, min(spread_deg, SPREAD_MAX_DEG)) / 2
+        low = HUE_MIN_DEG + margin
+        high = HUE_MAX_DEG - margin
+        hue = low + (high - low) * timbre
+
+        base = MIN_VALUE + (1 - MIN_VALUE) * loudness
+        return {
+            'hue': hue,
+            'saturation': BASE_SATURATION * (1 - pulse * BEAT_WASH),
+            'value': clamp01(base + (1 - base) * pulse * BEAT_LIFT) * brightness_gain,
+        }
+
+
+def create_renderer(analysis):
+    """Build renderer from analysis sidecar."""
+    return Renderer(analysis)
