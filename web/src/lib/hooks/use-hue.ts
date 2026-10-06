@@ -6,7 +6,9 @@ import { ApiError, api } from "@/lib/api/client";
 import type { HueArea, HueBridge, HueHealth } from "@/lib/api/types";
 import { pickArea } from "@/lib/hue-bridge";
 import { useHueBridge } from "@/lib/hooks/use-hue-bridge";
+import { useHueSettings } from "@/lib/hooks/use-hue-settings";
 import { usePersistedState } from "@/lib/hooks/use-persisted-state";
+import { useSpeaker } from "@/lib/hooks/use-speaker";
 
 /**
  * Only the id is stored. The name belongs to the bridge and the user may rename
@@ -149,10 +151,15 @@ export function useHue(): HueState {
     [refresh],
   );
 
+  const { selected: speaker } = useSpeaker();
+  const { settings } = useHueSettings();
+
   const start = useCallback(() => {
     if (!area) return;
-    run(() => api.hueStartStream(area.id));
-  }, [area, run]);
+    run(() =>
+      api.hueStartStream(area.id, speaker?.ip, settings),
+    );
+  }, [area, speaker, settings, run]);
 
   const stop = useCallback(() => run(() => api.hueStopStream()), [run]);
 

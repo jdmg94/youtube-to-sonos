@@ -42,6 +42,7 @@ function frame(overrides: Partial<NowPlaying> = {}): NowPlaying {
     video_id: "abc123",
     device: "Kitchen",
     device_ip: "10.0.0.1",
+    hue_colors: null,
     ...overrides,
   };
 }

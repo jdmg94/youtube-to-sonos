@@ -300,6 +300,8 @@ export interface NowPlaying {
   video_id: string | null;
   device: string;
   device_ip: string;
+  /** Server-generated colors for the Hue lights, published via SSE. */
+  hue_colors: Rgb[] | null;
 }
 
 /** A `data:` frame from `/api/events`: now-playing plus the station. */

@@ -8,7 +8,6 @@ import type { HueArea, HueBridge, NowPlaying, Rgb } from "@/lib/api/types";
 import { describeArea, describeBridge, describeHue, type HueTone } from "@/lib/hue-bridge";
 import { useErrorToast } from "@/lib/hooks/use-error-toast";
 import { useHue, type HueState } from "@/lib/hooks/use-hue";
-import { useHueRender, type AnalysisStatus } from "@/lib/hooks/use-hue-render";
 import { useHueSettings, type HueSettingsState } from "@/lib/hooks/use-hue-settings";
 import { cn } from "@/lib/utils";
 
@@ -30,19 +29,16 @@ export interface LightsPanelProps {
  * now always mounted.
  *
  * That difference is an improvement rather than a cost. The dialog kept the
- * render loop alive by mounting `useHue` and `useHueRender` on the *trigger*,
- * which stayed rendered while only the content unmounted — a subtlety a reader
- * had to be told about. Here there is nothing to unmount: the shell hides
- * off-tab panels with CSS precisely so state like this survives a tab switch.
+ * render loop alive by mounting `useHue` on the *trigger*, which stayed
+ * rendered while only the content unmounted — a subtlety a reader had to be
+ * told about. Here there is nothing to unmount: the shell hides off-tab panels
+ * with CSS precisely so state like this survives a tab switch.
  *
- * ## Two deliberate deviations from the dialog
+ * ## Server-side rendering
  *
- * `preview` is always on, where the dialog passed `open`. There is no longer a
- * moment when nobody can see the swatch strip on desktop, and the 4 Hz publish
- * that drives it re-renders this subtree only — `useHueRender` is mounted here,
- * so the queue and the stream form above it are untouched. Deriving a real
- * answer would mean a `matchMedia` hook, which is new machinery, an SSR
- * hydration risk, and a saving of a few spans.
+ * Colors are generated server-side at 16Hz and published via SSE at ~1-2Hz.
+ * The frontend simply displays them. This means users can start the lights and
+ * close the browser — the backend keeps running autonomously.
  *
  * Scanning is a button, where the dialog scanned on open. A panel has no "open"
  * to hang it on, and the only alternative — scanning on mount — is an mDNS
@@ -53,16 +49,9 @@ export function LightsPanel({ nowPlaying }: LightsPanelProps) {
   const hue = useHue();
   const dials = useHueSettings();
 
-  const { status, colors } = useHueRender({
-    nowPlaying,
-    streaming: hue.streaming,
-    preview: true,
-    // The area, not just its id: the loop lays the gradient out along the
-    // channel list and whatever positions the bridge knows for them.
-    area: hue.area,
-    settings: dials.resolved,
-    onStreamLost: hue.reportStreamLost,
-  });
+  // Colors come from the backend via SSE. The render loop queries the speaker
+  // directly, generates colors server-side, and publishes them on /api/events.
+  const colors = nowPlaying?.hue_colors ?? null;
 
   // Only the stream errors toast. `hue.error` is a health or scan failure,
   // which the header already states and which repeats on every refresh while a
@@ -81,7 +70,7 @@ export function LightsPanel({ nowPlaying }: LightsPanelProps) {
         <>
           <AreaList hue={hue} />
           <LightSettings dials={dials} />
-          <StreamControls hue={hue} status={status} colors={colors} />
+          <StreamControls hue={hue} nowPlaying={nowPlaying} colors={colors} />
         </>
       ) : (
         <BridgeList hue={hue} />
@@ -393,38 +382,36 @@ const DIAL_CLASS = cn(
 // The stream
 // ---------------------------------------------------------------------------
 
-/**
- * What the render loop is doing, in the user's terms.
- *
- * `unavailable` gets a sentence rather than a shrug because the lights are
- * still lit and still being driven — they are holding `IDLE_COLOR`. Saying
- * only "no analysis" would leave a warm glow in the room with nothing on
- * screen accounting for it.
- */
-const ANALYSIS_NOTE: Record<AnalysisStatus, string> = {
-  idle: "Esperando una pista",
-  analysing: "Analizando la pista…",
-  ready: "Siguiendo el ritmo",
-  unavailable: "Sin análisis para esta pista — manteniendo un brillo cálido",
-};
-
 function StreamControls({
   hue,
-  status,
+  nowPlaying,
   colors,
 }: {
   hue: HueState;
-  status: AnalysisStatus;
+  nowPlaying: NowPlaying | null;
   colors: Rgb[] | null;
 }) {
   const ready = hue.area ? describeArea(hue.area, hue.health).ready : false;
+
+  // Server-side status: if streaming and we have a track, derive status from
+  // whether analysis is available for it.
+  let statusText = "Las luces no están siguiendo";
+  if (hue.streaming) {
+    if (!nowPlaying) {
+      statusText = "Esperando una pista";
+    } else if (colors && colors.length > 0) {
+      statusText = "Siguiendo el ritmo";
+    } else {
+      statusText = "Sin análisis para esta pista — manteniendo un brillo cálido";
+    }
+  }
 
   return (
     <div className="mt-1.5 flex shrink-0 items-center gap-3 border-t border-border pt-4">
       <SwatchStrip colors={colors} streaming={hue.streaming} />
 
       <span className="min-w-0 flex-1 truncate text-[0.82rem] text-muted-foreground">
-        {hue.streaming ? ANALYSIS_NOTE[status] : "Las luces no están siguiendo"}
+        {statusText}
       </span>
 
       <Button

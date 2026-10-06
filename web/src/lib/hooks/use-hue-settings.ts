@@ -1,9 +1,12 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
-import { DEFAULT_SETTINGS, type HueSettings, type ResolvedSettings, resolveSettings } from "@/lib/hue";
+import { api } from "@/lib/api/client";
+import type { HueSettings } from "@/lib/api/types";
 import { usePersistedState } from "@/lib/hooks/use-persisted-state";
+
+const DEFAULT_SETTINGS: HueSettings = { brightness: 100, transition: 25, spread: 15 };
 
 /**
  * One key per slider rather than one object.
@@ -21,10 +24,8 @@ const KEYS = {
 } as const;
 
 export interface HueSettingsState {
-  /** Slider positions, 0..100, for the controls to render. */
+  /** Slider positions, 0..100, sent to the backend as-is. */
   settings: HueSettings;
-  /** The same three in palette units, for the render loop. */
-  resolved: ResolvedSettings;
   setBrightness: (position: number) => void;
   setTransition: (position: number) => void;
   setSpread: (position: number) => void;
@@ -54,11 +55,26 @@ export function useHueSettings(): HueSettingsState {
     [brightness, transition, spread],
   );
 
+  // Send settings updates to backend when stream is running. Skip the initial
+  // mount to avoid racing with the start call that already sends them.
+  const mounted = useRef(false);
+  useEffect(() => {
+    if (!mounted.current) {
+      mounted.current = true;
+      return;
+    }
+    // Fire and forget: if the stream isn't running the backend ignores it, and
+    // a failure here doesn't break the local sliders.
+    api.hueUpdateSettings(settings).catch(() => {
+      // Silent: the settings are persisted locally, so a dropped update recovers
+      // on the next adjustment or the next stream start.
+    });
+  }, [settings]);
+
   return {
+    // Memoised for a stable identity so the live-update effect doesn't fire on
+    // every render, only when an actual slider moves.
     settings,
-    // Memoised for a stable identity: the render loop reads this every tick and
-    // a fresh object each render would churn its effect dependencies.
-    resolved: useMemo(() => resolveSettings(settings), [settings]),
     setBrightness,
     setTransition,
     setSpread,
