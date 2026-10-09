@@ -2530,11 +2530,15 @@ def search():
         for entry in (info.get('entries') or []):
             if not entry:
                 continue
+            video_id = entry.get('id')
             results.append({
-                'id': entry.get('id'),
+                'id': video_id,
                 'title': entry.get('title'),
                 'uploader': entry.get('uploader') or entry.get('channel'),
-                'thumbnail': entry.get('thumbnail'),
+                # Construct thumbnail URL when not provided by extract_flat=True
+                'thumbnail': entry.get('thumbnail') or (
+                    f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else None
+                ),
                 'duration': entry.get('duration'),
             })
 
