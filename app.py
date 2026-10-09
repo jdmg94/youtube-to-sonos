@@ -446,6 +446,12 @@ HISTORY_FLUSH_INTERVAL = float(os.environ.get('HISTORY_FLUSH_INTERVAL', 60))
 CACHE_DIR = os.environ.get('CACHE_DIR') or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'cache')
 CACHE_BITRATE = os.environ.get('CACHE_BITRATE', '192k')
+# Volume normalization via EBU R128 loudnorm filter. Enabled by default to reduce
+# loudness variation across tracks. Set ENABLE_NORMALIZATION=0 to disable.
+ENABLE_NORMALIZATION = os.environ.get('ENABLE_NORMALIZATION', '1') == '1'
+TARGET_LOUDNESS = float(os.environ.get('TARGET_LOUDNESS', '-16'))  # LUFS
+LOUDNESS_TRUE_PEAK = float(os.environ.get('LOUDNESS_TRUE_PEAK', '-1.5'))  # dB
+LOUDNESS_LRA = float(os.environ.get('LOUDNESS_LRA', '11'))  # LU (loudness range)
 # Whether to capture PCM during transcode for the Hue beat analysis.
 # 'auto' (default) = on iff a bridge is paired; '1'/'0' force it either way.
 ANALYZE_MODE = os.environ.get('HUE_ANALYZE', 'auto').strip().lower()
@@ -987,6 +993,9 @@ def _ffmpeg_cmd(out_path, meta, art_path, pcm_path=None):
                 '-c:v', 'copy', '-disposition:v', 'attached_pic']
     else:
         cmd += ['-map', '0:a']
+    # Apply volume normalization filter if enabled (single-pass EBU R128 loudnorm)
+    if ENABLE_NORMALIZATION:
+        cmd += ['-af', f'loudnorm=I={TARGET_LOUDNESS}:TP={LOUDNESS_TRUE_PEAK}:LRA={LOUDNESS_LRA}']
     cmd += [
         '-f', 'mp3',
         '-acodec', 'libmp3lame',
@@ -2460,6 +2469,8 @@ def health():
         "cookies": bool(COOKIES_FILE),
         "stations": stations,
         "cache_dir": CACHE_DIR,
+        "normalization_enabled": ENABLE_NORMALIZATION,
+        "target_loudness": TARGET_LOUDNESS,
     })
 
 

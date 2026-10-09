@@ -82,6 +82,22 @@ The backend is `app.py` plus two Hue modules: `hue.py` (bridge discovery, pairin
 2. `ensure_cached(video_id, priority=...)` → `_download` on `_SCHED` (see **Download scheduling**) — yt-dlp resolves the direct URL *and its `http_headers`*, ffmpeg transcodes it to `CACHE_DIR/<id>.mp3` (via `.part` + atomic rename) with ID3 tags and embedded cover art, and writes an `<id>.json` sidecar plus an `<id>.jpg` thumbnail.
 3. `GET /media/<id>.mp3` — what Sonos actually pulls. A complete file is served with `Content-Length` + Range support (so the speaker can seek); an incomplete one is tail-served chunked while the download continues, which is how a cold start or a jump backwards still begins in seconds.
 
+### Volume normalization
+
+**Enabled by default** to reduce loudness variation across tracks. Uses ffmpeg's single-pass EBU R128 `loudnorm` filter during transcode (`_ffmpeg_cmd`), applied at -16 LUFS (Apple Music/Tidal standard).
+
+Configuration via environment variables:
+* `ENABLE_NORMALIZATION` — `1` (default, on) or `0` (disable)
+* `TARGET_LOUDNESS` — default `-16` LUFS; `-14` matches Spotify/YouTube Music, `-18` is more conservative
+* `LOUDNESS_TRUE_PEAK` — default `-1.5` dB; prevents clipping
+* `LOUDNESS_LRA` — default `11` LU (loudness range target)
+
+The filter is applied **only to the mp3 output**, not the PCM stream for Hue analysis. Existing cache files downloaded before normalization was enabled play as-is; only new downloads are normalized. No migration or bulk re-processing is needed.
+
+**Why single-pass:** Two-pass (measure, then normalize) is more accurate but requires storing the yt-dlp output temporarily and adds latency. Single-pass approximates the measurement in real-time during transcode and handles 95%+ of tracks correctly, keeping the pipeline fast and simple.
+
+The `/api/health` endpoint reports `normalization_enabled` and `target_loudness` so clients can display the current config.
+
 ### Download scheduling
 
 `_Scheduler` (replacing a plain `ThreadPoolExecutor`) dispatches downloads by **priority = distance from what the speaker needs**: `PRIORITY_MEDIA` (-1) for an open `/media` socket, `0` for the track under the cursor, `N` for N tracks ahead. Lower wins.

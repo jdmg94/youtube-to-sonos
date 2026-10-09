@@ -33,6 +33,8 @@ RUN echo "Update key: ${UPDATE_DATE}" && \
 # VOLUME directive: that would create a throwaway anonymous volume on every run.
 RUN mkdir -p /app/cache
 ENV CACHE_DIR=/app/cache
+# Volume normalization is enabled by default (EBU R128 loudnorm at -16 LUFS).
+# Override with ENABLE_NORMALIZATION=0 to disable, or adjust TARGET_LOUDNESS.
 
 # Layer 4: Application code (frequently changed)
 # This image is the API and media server. The UI has its own image built from

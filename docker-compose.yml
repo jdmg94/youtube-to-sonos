@@ -48,6 +48,12 @@ services:
       # Override the auto-detected LAN IP if the host has multiple NICs.
       # Sonos must be able to reach this address to pull the stream.
       # STREAM_HOST: 192.168.1.50
+      # Volume normalization (EBU R128 loudnorm). Enabled by default at -16 LUFS.
+      # Set ENABLE_NORMALIZATION: "0" to disable if you prefer unnormalized audio.
+      # ENABLE_NORMALIZATION: "1"
+      # TARGET_LOUDNESS: "-16"
+      # LOUDNESS_TRUE_PEAK: "-1.5"
+      # LOUDNESS_LRA: "11"
     # yt-dlp cookies, delivered by mount rather than baked into the image
     # (.containerignore keeps them out of the build context — they are live
     # session auth). The file MUST exist before `up`: when the source of a bind
