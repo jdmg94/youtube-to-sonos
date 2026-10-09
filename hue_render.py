@@ -34,6 +34,10 @@ TAU_MAX_SECONDS = 2.0
 COLOR_EPSILON = 3
 IDLE_COLOR = (60, 45, 30)
 POSITION_EPSILON = 1e-6
+# How often to look for a sidecar that wasn't there when the track started.
+# Analysis is submitted only after the download commits, so it routinely lands
+# seconds into playback; _tick runs at ~16 Hz and need not stat the disk each time.
+RELOAD_INTERVAL_MS = 1000
 DEFAULT_SETTINGS = {'brightness': 100, 'transition': 25, 'spread': 15}
 
 
@@ -317,6 +321,7 @@ class RenderLoop:
         self.clock = None
         self.renderer = None
         self.current_track = None
+        self._next_load_ms = 0
         self.eased = None
         self.last_tick_ms = None
 
@@ -368,15 +373,20 @@ class RenderLoop:
             logger.warning(f"Hue render: could not query speaker: {e}")
             video_id, position_str, playing = None, None, False
 
-        # Load analysis if track changed
+        # Track changed: drop the old track's renderer and clock, and load now
         if video_id != self.current_track:
             self.current_track = video_id
             self.renderer = None
             self.clock = None
-            if video_id:
-                data = analysis.load(self.cache_dir, video_id)
-                if data:
-                    self.renderer = create_renderer(data)
+            self._next_load_ms = now_ms
+
+        # Keep retrying until the sidecar exists. Loading only on track change
+        # left a stream started before analysis finished idle for the whole track.
+        if video_id and self.renderer is None and now_ms >= self._next_load_ms:
+            self._next_load_ms = now_ms + RELOAD_INTERVAL_MS
+            data = analysis.load(self.cache_dir, video_id)
+            if data:
+                self.renderer = create_renderer(data)
 
         # Sync clock
         reported_seconds = parse_sonos_time(position_str)

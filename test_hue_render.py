@@ -1,13 +1,17 @@
+import json
+import shutil
+import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import threading
 import time
+import analysis
 from hue_render import (
     parse_sonos_time, Clock, position_at, sync_clock, hsv_to_rgb, sample,
     last_beat_index, create_renderer, order_channels, spread_across,
     ease_toward, resolve_settings, DEFAULT_SETTINGS, BRIGHTNESS_FLOOR,
     DECAY_MIN, DECAY_MAX, SPREAD_MAX_DEG, TAU_MIN_SECONDS, TAU_MAX_SECONDS,
-    RenderLoop
+    RenderLoop, IDLE_COLOR
 )
 
 
@@ -334,3 +338,78 @@ class RenderLoopLifecycle(unittest.TestCase):
         self.assertEqual(loop.settings, new_settings)
 
         loop.stop()
+
+
+class RenderLoopLateAnalysis(unittest.TestCase):
+    """The sidecar lands seconds after playback starts, because analysis is
+    submitted only once the download is committed. A stream started inside
+    that window must pick it up when it appears, not idle for the whole track.
+    """
+
+    VIDEO_ID = 'abcdefghijk'
+
+    def setUp(self):
+        self.cache_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.cache_dir, ignore_errors=True)
+
+        self.session = Mock()
+        self.session.channels = [0]
+        self.session.positions = {}
+        self.session.last_sent = None
+
+        self.speaker = Mock()
+        self.speaker.get_current_track_info.return_value = {
+            'uri': f'http://10.0.0.2:5001/media/{self.VIDEO_ID}.mp3',
+            'position': '0:00:10',
+        }
+        self.speaker.get_current_transport_info.return_value = {'current_transport_state': 'PLAYING'}
+
+        self.loop = RenderLoop(self.session, self.speaker, self.cache_dir, dict(DEFAULT_SETTINGS))
+
+        # Drive _tick directly on a fake monotonic clock: no thread, no sleeps.
+        self.now = 1000.0
+        clock = patch('hue_render.time')
+        self.addCleanup(clock.stop)
+        clock.start().monotonic.side_effect = lambda: self.now
+
+    def write_sidecar(self):
+        _, sidecar = analysis.analysis_paths(self.cache_dir, self.VIDEO_ID)
+        with open(sidecar, 'w') as fh:
+            json.dump({
+                'version': analysis.SIDECAR_VERSION,
+                'duration': 30.0,
+                'tempo': 120.0,
+                'frame_seconds': 0.1,
+                'beats': [i * 0.5 for i in range(60)],
+                'energy': [0.8] * 300,
+                'brightness': [i / 300 for i in range(300)],
+            }, fh)
+
+    def published(self):
+        return self.session.set_current_colors.call_args[0][0]
+
+    def test_picks_up_sidecar_written_after_track_started(self):
+        self.loop._tick()
+        self.assertEqual(self.published(), [IDLE_COLOR])
+
+        self.write_sidecar()
+        self.now += 5.0
+        self.loop._tick()
+
+        self.assertEqual(self.loop.current_track, self.VIDEO_ID)
+        self.assertIsNotNone(self.loop.renderer)
+        self.assertNotEqual(self.published(), [IDLE_COLOR])
+
+    def test_does_not_hit_disk_every_tick_while_waiting(self):
+        with patch('analysis.load', return_value=None) as load:
+            for _ in range(10):
+                self.loop._tick()
+                self.now += 0.060
+        # 10 ticks span 0.6s: the track-change load, and nothing more.
+        self.assertEqual(load.call_count, 1)
+
+    def test_loads_on_the_track_change_tick(self):
+        self.write_sidecar()
+        self.loop._tick()
+        self.assertIsNotNone(self.loop.renderer)
+        self.assertNotEqual(self.published(), [IDLE_COLOR])
