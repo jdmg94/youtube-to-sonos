@@ -302,6 +302,8 @@ export interface NowPlaying {
   device_ip: string;
   /** Server-generated colors for the Hue lights, published via SSE. */
   hue_colors: Rgb[] | null;
+  /** Current crossfade setting on the speaker, or `null` if unavailable. */
+  crossfade: boolean | null;
 }
 
 /** A `data:` frame from `/api/events`: now-playing plus the station. */
@@ -356,6 +358,21 @@ export interface VolumeRequest {
   device_ip?: string;
   volume?: number;
   mute?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// /api/crossfade
+// ---------------------------------------------------------------------------
+
+export interface CrossfadeState {
+  crossfade: boolean;
+  device: string;
+  device_ip: string;
+}
+
+export interface CrossfadeRequest {
+  device_ip?: string;
+  crossfade: boolean;
 }
 
 // ---------------------------------------------------------------------------

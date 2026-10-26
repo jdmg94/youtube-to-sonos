@@ -8,6 +8,8 @@
  */
 import type {
   ApiErrorBody,
+  CrossfadeRequest,
+  CrossfadeState,
   Device,
   Downloads,
   Health,
@@ -274,6 +276,15 @@ export const api = {
 
   setVolume: (body: VolumeRequest, signal?: AbortSignal) =>
     request<VolumeState>("/api/volume", { method: "POST", body, signal }),
+
+  getCrossfade: (deviceIp?: string, signal?: AbortSignal) =>
+    request<CrossfadeState>("/api/crossfade", {
+      query: { device_ip: deviceIp },
+      signal,
+    }),
+
+  setCrossfade: (body: CrossfadeRequest, signal?: AbortSignal) =>
+    request<CrossfadeState>("/api/crossfade", { method: "POST", body, signal }),
 
   downloads: (signal?: AbortSignal) =>
     request<Downloads>("/api/downloads", { signal }),

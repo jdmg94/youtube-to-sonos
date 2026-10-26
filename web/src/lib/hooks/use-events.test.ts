@@ -89,6 +89,7 @@ function frame(overrides: Partial<EventFrame> = {}): EventFrame {
     video_id: "abc",
     device: "Kitchen",
     device_ip: "10.0.0.1",
+    crossfade: null,
     station: { index: 0, exhausted: false, tracks: [] },
     hue_colors: null,
     ...overrides,

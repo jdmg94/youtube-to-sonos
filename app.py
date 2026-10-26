@@ -2681,6 +2681,10 @@ def play():
         except Exception as e:
             logger.warning(f"Could not set play mode: {e}")
 
+        # Note: crossfade is NOT set here. It's a persistent speaker property
+        # controlled via GET/POST /api/crossfade, and we don't override it on
+        # every play — the listener's preference stays set.
+
         station = start_station(device_ip, seed)
         enqueue(coordinator, station.tracks[0])
         station.enqueued = 1
@@ -3018,6 +3022,13 @@ def _now_playing_payload(speaker):
     except (TypeError, ValueError):
         playlist_position = 0
 
+    # Read crossfade from the coordinator with a fallback for errors
+    try:
+        crossfade = coordinator.cross_fade
+    except Exception as e:
+        logger.debug(f"Could not read crossfade: {e}")
+        crossfade = None
+
     return {
         "state": transport.get('current_transport_state'),  # PLAYING / PAUSED_PLAYBACK / STOPPED / TRANSITIONING
         "title": title,
@@ -3033,7 +3044,8 @@ def _now_playing_payload(speaker):
         "is_radio": is_ours,
         "video_id": video_id,
         "device": speaker.player_name,
-        "device_ip": speaker.ip_address
+        "device_ip": speaker.ip_address,
+        "crossfade": crossfade
     }
 
 @app.route('/api/now-playing', methods=['GET'])
@@ -3166,6 +3178,59 @@ def set_volume():
         })
     except Exception as e:
         logger.error(f"Set volume failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/crossfade', methods=['GET'])
+def get_crossfade():
+    device_ip = request.args.get('device_ip')
+    try:
+        if not device_ip:
+            devices = list(soco.discover() or [])
+            if not devices:
+                return jsonify({"error": "No Sonos devices discovered"}), 404
+            speaker = devices[0]
+        else:
+            speaker = soco.SoCo(device_ip)
+
+        coordinator = _coordinator(speaker)
+        return jsonify({
+            "crossfade": coordinator.cross_fade,
+            "device": speaker.player_name,
+            "device_ip": speaker.ip_address
+        })
+    except Exception as e:
+        logger.error(f"Get crossfade failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/crossfade', methods=['POST'])
+def set_crossfade():
+    data = request.get_json() or {}
+    device_ip = data.get('device_ip')
+    crossfade = data.get('crossfade')
+
+    if crossfade is None:
+        return jsonify({"error": "Missing 'crossfade' parameter"}), 400
+
+    try:
+        if not device_ip:
+            devices = list(soco.discover() or [])
+            if not devices:
+                return jsonify({"error": "No Sonos devices discovered"}), 404
+            speaker = devices[0]
+        else:
+            speaker = soco.SoCo(device_ip)
+
+        coordinator = _coordinator(speaker)
+        coordinator.cross_fade = bool(crossfade)
+        logger.info(f"Set crossfade={crossfade} on '{speaker.player_name}'")
+
+        return jsonify({
+            "crossfade": coordinator.cross_fade,
+            "device": speaker.player_name,
+            "device_ip": speaker.ip_address
+        })
+    except Exception as e:
+        logger.error(f"Set crossfade failed: {e}")
         return jsonify({"error": str(e)}), 500
 
 # --- Philips Hue -------------------------------------------------------------

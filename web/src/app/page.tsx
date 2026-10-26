@@ -4,6 +4,8 @@ import { useCallback, useState } from "react";
 import { toast } from "sonner";
 
 import { AppHeader } from "@/components/app-header";
+import { CrossfadeToggle } from "@/components/crossfade-toggle";
+import { DiscoveryBadge } from "@/components/discovery-badge";
 import { LightsPanel } from "@/components/lights-panel";
 import { NowPlayingCard } from "@/components/now-playing";
 import { PlayerBar } from "@/components/player-bar";
@@ -86,9 +88,7 @@ export default function Home() {
 
   return (
     <>
-      <AppHeader
-        discovery={{ count: devices.length, scanning: loading, failed: error !== null }}
-      />
+      <AppHeader />
 
       {/*
        * `min-h-0` on the grid and on every child is what lets the panels scroll
@@ -154,7 +154,10 @@ export default function Home() {
            * That padding only survives because the grid above is
            * `max-[900px]:content-start`; see the comment there.
            */}
-          <Section panel="speaker" tab={tab} className="p-3">
+          <Section panel="speaker" tab={tab} className="flex flex-col gap-4 p-3">
+            <DiscoveryBadge
+              discovery={{ count: devices.length, scanning: loading, failed: error !== null }}
+            />
             <SpeakerDialog
               devices={devices}
               loading={loading}
@@ -166,6 +169,7 @@ export default function Home() {
                 toast.success(`Altavoz seleccionado: ${device.name}`);
               }}
             />
+            <CrossfadeToggle device={selected} crossfade={nowPlaying?.crossfade ?? null} />
           </Section>
 
           {/*

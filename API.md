@@ -371,7 +371,8 @@ the fresh list; nothing was removed.
   "is_radio": true,
   "video_id": "dQw4w9WgXcQ",
   "device": "Kitchen",
-  "device_ip": "192.168.1.31"
+  "device_ip": "192.168.1.31",
+  "crossfade": true
 }
 ```
 
@@ -382,6 +383,7 @@ the fresh list; nothing was removed.
 | `station_index` | 0-based cursor, or `null` when no station is running. |
 | `is_radio` | Legacy key. Now means "this is a track we are serving", i.e. `video_id !== null`. |
 | `video_id` | `null` when the speaker is playing something that isn't ours. |
+| `crossfade` | Current crossfade setting on the speaker, or `null` if unavailable. |
 
 `album_art` is an absolute URL to *this server*, not to YouTube. It is what
 Sonos was given in the DIDL metadata. It is browser-reachable as long as
@@ -447,6 +449,28 @@ optional; send either or both. `volume` is clamped to 0–100.
 Responds with the resulting `{"volume", "mute", "device"}` (no `device_ip`).
 
 Clients should debounce slider input; each call is a UPnP round trip.
+
+---
+
+## `GET /api/crossfade?device_ip=<ip>`
+
+`{"crossfade": true, "device": "Kitchen", "device_ip": "192.168.1.31"}`
+
+## `POST /api/crossfade`
+
+`{"device_ip": "...", "crossfade": true}` — `crossfade` is required (boolean).
+
+Responds with the resulting `{"crossfade", "device", "device_ip"}`.
+
+Crossfade is a **persistent speaker property** (Sonos remembers it across
+sessions), not a per-station setting. Enabling it makes Sonos smoothly overlap
+the end of one track with the start of the next (typically 2–3 seconds), which
+reduces the gap between tracks. It applies to the speaker's entire queue, not
+just this app's tracks.
+
+The setting is **not** overridden by `/api/play` — once set, it stays set until
+changed by another call to this endpoint or manually via the Sonos app. This is
+deliberate: the listener's crossfade preference should persist across seeds.
 
 ---
 
