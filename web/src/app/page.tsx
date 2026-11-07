@@ -66,7 +66,7 @@ export default function Home() {
    * media keys, notification tray, Bluetooth controls, etc.). Updates metadata
    * and playback state whenever nowPlaying changes.
    */
-  useMediaSession(nowPlaying, selected?.ip ?? null);
+  useMediaSession(nowPlaying, station, selected?.ip ?? null);
 
   /*
    * Persisted, and read through `readTab` rather than used raw. The tab is

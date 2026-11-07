@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { NowPlaying } from "@/lib/api/types";
+import type { NowPlaying, StationBody } from "@/lib/api/types";
 import { api } from "@/lib/api/client";
 
 /**
@@ -18,6 +18,7 @@ import { api } from "@/lib/api/client";
  */
 export function useMediaSession(
   nowPlaying: NowPlaying | null,
+  station: StationBody | null,
   deviceIp: string | null
 ) {
   // Track the last video_id to detect track changes
@@ -36,6 +37,7 @@ export function useMediaSession(
       video_id: nowPlaying?.video_id,
       title: nowPlaying?.title,
       state: nowPlaying?.state,
+      station_index: station?.index,
       deviceIp,
     });
 
@@ -50,50 +52,47 @@ export function useMediaSession(
       audioRef.current.loop = true;
       audioRef.current.volume = 0; // Silent
 
-      // Create a silent audio data URL (1 second of silence)
-      // This is a minimal WAV file with silence
-      const silentAudio = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
-      audioRef.current.src = silentAudio;
+      // Create a 1-second silent MP3 (44.1kHz mono, minimal size)
+      // This is more compatible across browsers than WAV
+      const silentMp3 = "data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADhAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAA4S2FzbwAAAAAAAAAAAAAAAAAAAAD/+xDEAAAAAAAAAAAAAAAAAAAAAABJbmZvAAAADwAAAAIAAAOEALu7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7v//////////////////////////////////////////////////////////////////wAAAExhdmM1OC4xMwAAAAAAAAAAAAAAACQAAAAAAAAAAAOEthZW8AAAAAAAAAAAAAAAAAAAA//sQxAADgnKCFAAAAIAAAP+AAAAAQAAAB4AAAACAgICAgICAgICAgICAgICAgICAgIA=";
+      audioRef.current.src = silentMp3;
       audioRef.current.preload = "auto";
     }
 
-    // Helper to construct absolute artwork URL
-    const getArtworkUrl = (videoId: string): string => {
-      // Use window.location.origin to ensure absolute URL
-      // This goes through Next.js proxy to backend /media/<id>.jpg
-      return `${window.location.origin}/api/media/${videoId}.jpg`;
-    };
+    // Get the current track from station data (has YouTube thumbnail URL)
+    const currentTrack = station && nowPlaying?.station_index != null
+      ? station.tracks[nowPlaying.station_index]
+      : null;
 
     // Helper to create artwork array (Media Session spec expects multiple sizes)
-    const createArtwork = (
-      videoId: string
-    ): MediaImage[] => {
-      const url = getArtworkUrl(videoId);
-      // Provide multiple size hints (backend serves one resolution, but OS can pick optimal)
+    const createArtwork = (thumbnailUrl: string): MediaImage[] => {
+      // Use YouTube's CDN thumbnail (already available, no proxy needed)
+      // Provide multiple size hints for OS optimization
       return [
-        { src: url, sizes: "96x96", type: "image/jpeg" },
-        { src: url, sizes: "128x128", type: "image/jpeg" },
-        { src: url, sizes: "256x256", type: "image/jpeg" },
-        { src: url, sizes: "512x512", type: "image/jpeg" },
+        { src: thumbnailUrl, sizes: "120x90", type: "image/jpeg" },
+        { src: thumbnailUrl, sizes: "320x180", type: "image/jpeg" },
+        { src: thumbnailUrl, sizes: "480x360", type: "image/jpeg" },
       ];
     };
 
     // Update metadata when track changes or playback state changes
-    if (nowPlaying && nowPlaying.video_id) {
+    if (nowPlaying && nowPlaying.video_id && currentTrack) {
       lastVideoIdRef.current = nowPlaying.video_id;
 
       console.log("[Media Session] Setting metadata:", {
-        title: nowPlaying.title || "Unknown Title",
-        artist: nowPlaying.artist || "Unknown Artist",
+        title: currentTrack.title || "Unknown Title",
+        artist: currentTrack.uploader || "Unknown Artist",
+        thumbnail: currentTrack.thumbnail,
         state: nowPlaying.state,
       });
 
       // Set metadata (title, artist, album, artwork)
+      // Use station track data which has YouTube CDN thumbnail
       mediaSession.metadata = new MediaMetadata({
-        title: nowPlaying.title || "Unknown Title",
-        artist: nowPlaying.artist || "Unknown Artist",
-        album: nowPlaying.artist || "", // Use artist/uploader as album
-        artwork: createArtwork(nowPlaying.video_id),
+        title: currentTrack.title || nowPlaying.title || "Unknown Title",
+        artist: currentTrack.uploader || nowPlaying.artist || "Unknown Artist",
+        album: currentTrack.uploader || nowPlaying.artist || "", // Use artist/uploader as album
+        artwork: currentTrack.thumbnail ? createArtwork(currentTrack.thumbnail) : undefined,
       });
 
       // Set playback state and control silent audio element
@@ -205,5 +204,5 @@ export function useMediaSession(
         audioRef.current.src = "";
       }
     };
-  }, [nowPlaying, deviceIp]);
+  }, [nowPlaying, station, deviceIp]);
 }
