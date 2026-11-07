@@ -16,6 +16,7 @@ import { SearchPanel } from "@/components/search-panel";
 import { TabBar } from "@/components/tab-bar";
 import { VolumePanel } from "@/components/volume-panel";
 import { useEvents } from "@/lib/hooks/use-events";
+import { useMediaSession } from "@/lib/hooks/use-media-session";
 import { usePersistedState } from "@/lib/hooks/use-persisted-state";
 import { useSpeaker } from "@/lib/hooks/use-speaker";
 import {
@@ -59,6 +60,13 @@ export default function Home() {
    * the same track changing at different moments.
    */
   const { nowPlaying, station } = useEvents(selected?.ip ?? null);
+
+  /*
+   * Integrate with Media Session API to enable native OS controls (lock screen,
+   * media keys, notification tray, Bluetooth controls, etc.). Updates metadata
+   * and playback state whenever nowPlaying changes.
+   */
+  useMediaSession(nowPlaying, selected?.ip ?? null);
 
   /*
    * Persisted, and read through `readTab` rather than used raw. The tab is
